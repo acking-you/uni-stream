@@ -1,12 +1,12 @@
 [package]
 authors = ['LB7666 <acking-you@foxmail.com>']
-description = 'Provides universal stream for TCP and UDP traffic and provides custom DNS resolution service'
+description = 'Provides universal stream for TCP and UDP traffic and custom DNS resolution service'
 edition = '2021'
 homepage = 'https://github.com/acking-you/uni-stream'
 license = 'MIT'
 name = 'uni-stream'
 version = '0.0.1'
-keywords = ["stream", "udp", "tcp", "ip", "dns", "address", "tokio"]
+keywords = ["stream", "udp", "tcp", "ip", "dns"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
