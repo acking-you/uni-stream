@@ -19,6 +19,11 @@ To use `uni-stream` in your Rust project, simply add it as a dependency in your 
 [dependencies]
 uni-stream = "0.0.1"
 ``` 
+You must also make sure that the Rust version >= 1.75, because [AFIT](https://blog.rust-lang.org/2023/12/28/Rust-1.75.0.html) is required, so you need to add the following `rust-toolchain.toml` to the project root directory:
+```toml
+[toolchain]
+channel = "1.75.0"
+```
 
 Then, you can import and use the library in your Rust code.The following is a generic-based implementation of echo_server:
 
