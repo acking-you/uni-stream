@@ -17,7 +17,7 @@ To use `uni-stream` in your Rust project, simply add it as a dependency in your 
 
 ```toml
 [dependencies]
-uni-stream = "0.0.2"
+uni-stream = "0.1.0"
 ``` 
 You must also make sure that the Rust version >= 1.75, because [AFIT](https://blog.rust-lang.org/2023/12/28/Rust-1.75.0.html) is required, so you need to add the following `rust-toolchain.toml` to the project root directory:
 ```toml
@@ -101,7 +101,7 @@ set_custom_timeout(timeout);
 Or don't set any timeout on `UdpStream`
 ```rust
 [dependencies]
-uni-stream = { version = "0.0.2", default-features = false }
+uni-stream = { version = "0.1.0", default-features = false }
 ```
 
 
