@@ -17,7 +17,7 @@ To use `uni-stream` in your Rust project, simply add it as a dependency in your 
 
 ```toml
 [dependencies]
-uni-stream = "0.0.11"
+uni-stream = "0.0.2"
 ``` 
 You must also make sure that the Rust version >= 1.75, because [AFIT](https://blog.rust-lang.org/2023/12/28/Rust-1.75.0.html) is required, so you need to add the following `rust-toolchain.toml` to the project root directory:
 ```toml
@@ -92,6 +92,18 @@ use uni_stream::addr::set_custom_dns_server;
 // use google and alibaba dns server
 set_custom_dns_server(&["8.8.8.8".parse().unwrap(), "233.5.5.5".parse().unwrap()]).unwrap();
 ```
+
+Customize Udp Timeout:
+```rust
+use uni_stream::udp::set_custom_timeout;
+set_custom_timeout(timeout);
+```
+Or don't set any timeout on `UdpStream`
+```rust
+[dependencies]
+uni-stream = { version = "0.0.2", default-features = false }
+```
+
 
 
 For more details on how to use `uni-stream`, please refer to the [examples](https://github.com/acking-you/uni-stream/tree/master/examples).

@@ -12,6 +12,12 @@ use hashbrown::HashMap;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::UdpSocket;
 
+#[cfg(feature = "udp-timeout")]
+use tokio::time::Sleep;
+
+#[cfg(feature = "udp-timeout")]
+use crate::udp::impl_inner::get_sleep;
+
 use self::impl_inner::{UdpStreamReadContext, UdpStreamWriteContext};
 use super::addr::{each_addr, ToSocketAddrs};
 
@@ -34,13 +40,24 @@ macro_rules! error_get_or_continue {
 
 mod impl_inner {
 
+    #[cfg(feature = "udp-timeout")]
+    use std::time::Duration;
+
+    #[cfg(feature = "udp-timeout")]
+    use futures::FutureExt;
     use futures::StreamExt;
+    #[cfg(feature = "udp-timeout")]
+    use once_cell::sync::Lazy;
+    #[cfg(feature = "udp-timeout")]
+    use tokio::time::{sleep, Instant};
 
     use super::*;
 
     pub(super) trait UdpStreamReadContext {
         fn get_mut_remaining_bytes(&mut self) -> &mut Option<Bytes>;
         fn get_receiver_stream(&mut self) -> &mut flume::r#async::RecvStream<'static, Bytes>;
+        #[cfg(feature = "udp-timeout")]
+        fn get_timeout(&mut self) -> &mut Pin<Box<Sleep>>;
     }
 
     pub(super) trait UdpStreamWriteContext {
@@ -53,15 +70,45 @@ mod impl_inner {
         cx: &mut Context,
         buf: &mut ReadBuf,
     ) -> Poll<Result<()>> {
-        if let Some(remaining) = read_ctx.get_mut_remaining_bytes() {
+        // timeout
+        #[cfg(feature = "udp-timeout")]
+        if read_ctx.get_timeout().poll_unpin(cx).is_ready() {
+            buf.clear();
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "UdpStream timeout with duration:{:?}",
+                    get_timeout_duration()
+                ),
+            )));
+        }
+
+        #[cfg(feature = "udp-timeout")]
+        #[inline]
+        fn update_timeout(timeout: &mut Pin<Box<Sleep>>) {
+            timeout
+                .as_mut()
+                .reset(Instant::now() + get_timeout_duration())
+        }
+
+        let is_consume_remaining = if let Some(remaining) = read_ctx.get_mut_remaining_bytes() {
             if buf.remaining() < remaining.len() {
                 buf.put_slice(&remaining.split_to(buf.remaining())[..]);
             } else {
                 buf.put_slice(&remaining[..]);
                 *read_ctx.get_mut_remaining_bytes() = None;
             }
-            return Poll::Ready(Ok(()));
+            true
+        } else {
+            false
         };
+
+        if is_consume_remaining {
+            #[cfg(feature = "udp-timeout")]
+            update_timeout(read_ctx.get_timeout());
+            return Poll::Ready(Ok(()));
+        }
+
         let remaining = match read_ctx.get_receiver_stream().poll_next_unpin(cx) {
             Poll::Ready(Some(mut inner_buf)) => {
                 let remaining = if buf.remaining() < inner_buf.len() {
@@ -80,6 +127,8 @@ mod impl_inner {
             }
             Poll::Pending => return Poll::Pending,
         };
+        #[cfg(feature = "udp-timeout")]
+        update_timeout(read_ctx.get_timeout());
         *read_ctx.get_mut_remaining_bytes() = remaining;
         Poll::Ready(Ok(()))
     }
@@ -93,7 +142,41 @@ mod impl_inner {
             .get_socket()
             .poll_send_to(cx, buf, *write_ctx.get_peer_addr())
     }
+
+    #[cfg(feature = "udp-timeout")]
+    const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
+
+    #[cfg(feature = "udp-timeout")]
+    static mut CUSTOM_TIMEOUT: Option<Duration> = None;
+
+    /// Set custom timeout.
+    /// Note that this function can only be called before the [`TIMEOUT`] lazy variable is created.
+    #[cfg(feature = "udp-timeout")]
+    pub fn set_custom_timeout(timeout: Duration) {
+        unsafe { CUSTOM_TIMEOUT = Some(timeout) }
+    }
+
+    #[cfg(feature = "udp-timeout")]
+    static TIMEOUT: Lazy<Duration> = Lazy::new(|| match unsafe { CUSTOM_TIMEOUT } {
+        Some(dur) => dur,
+        None => DEFAULT_TIMEOUT,
+    });
+
+    #[cfg(feature = "udp-timeout")]
+    #[inline]
+    pub(super) fn get_timeout_duration() -> Duration {
+        *TIMEOUT
+    }
+
+    #[cfg(feature = "udp-timeout")]
+    #[inline]
+    pub(super) fn get_sleep() -> Sleep {
+        sleep(get_timeout_duration())
+    }
 }
+
+#[cfg(feature = "udp-timeout")]
+pub use impl_inner::set_custom_timeout;
 
 /// An I/O object representing a UDP socket listening for incoming connections.
 ///
@@ -153,7 +236,8 @@ impl UdpListener {
                         let peer_addr = error_get_or_continue!(ret,"UDPListener clean conn");
                         streams.remove(&peer_addr);
                     }
-                    Ok((len, peer_addr)) = socket.recv_buf_from(&mut buf) => {
+                    ret = socket.recv_buf_from(&mut buf) => {
+                        let (len,peer_addr) = error_get_or_continue!(ret,"UdpListener `recv_buf_from`");
                         match streams.get(&peer_addr) {
                             Some(tx) => {
                                 if let Err(err) =  tx.send_async(buf.copy_to_bytes(len)).await{
@@ -173,6 +257,8 @@ impl UdpListener {
                                 let udp_stream = UdpStream {
                                     local_addr,
                                     peer_addr,
+                                    #[cfg(feature = "udp-timeout")]
+                                    timeout: Box::pin(get_sleep()),
                                     recv_stream: child_rx.into_stream(),
                                     socket: socket.clone(),
                                     _handler_guard: None,
@@ -240,6 +326,8 @@ pub struct UdpStream {
     local_addr: SocketAddr,
     peer_addr: SocketAddr,
     socket: Arc<tokio::net::UdpSocket>,
+    #[cfg(feature = "udp-timeout")]
+    timeout: Pin<Box<Sleep>>,
     recv_stream: flume::r#async::RecvStream<'static, Bytes>,
     remaining: Option<Bytes>,
     _handler_guard: Option<TaskJoinHandleGuard>,
@@ -302,6 +390,8 @@ impl UdpStream {
         Ok(UdpStream {
             local_addr,
             peer_addr,
+            #[cfg(feature = "udp-timeout")]
+            timeout: Box::pin(get_sleep()),
             recv_stream: rx.into_stream(),
             socket,
             _handler_guard: Some(TaskJoinHandleGuard(handler)),
@@ -326,6 +416,8 @@ impl UdpStream {
             UdpStreamReadHalf {
                 recv_stream: self.recv_stream.clone(),
                 remaining: self.remaining.clone(),
+                #[cfg(feature = "udp-timeout")]
+                timeout: Box::pin(get_sleep()),
             },
             UdpStreamWriteHalf {
                 socket: &self.socket,
@@ -342,6 +434,11 @@ impl UdpStreamReadContext for std::pin::Pin<&mut UdpStream> {
 
     fn get_receiver_stream(&mut self) -> &mut flume::r#async::RecvStream<'static, Bytes> {
         &mut self.recv_stream
+    }
+
+    #[cfg(feature = "udp-timeout")]
+    fn get_timeout(&mut self) -> &mut Pin<Box<Sleep>> {
+        &mut self.timeout
     }
 }
 
@@ -379,6 +476,8 @@ impl AsyncWrite for UdpStream {
 pub struct UdpStreamReadHalf<'a> {
     recv_stream: flume::r#async::RecvStream<'a, Bytes>,
     remaining: Option<Bytes>,
+    #[cfg(feature = "udp-timeout")]
+    timeout: Pin<Box<Sleep>>,
 }
 
 impl UdpStreamReadContext for std::pin::Pin<&mut UdpStreamReadHalf<'static>> {
@@ -388,6 +487,11 @@ impl UdpStreamReadContext for std::pin::Pin<&mut UdpStreamReadHalf<'static>> {
 
     fn get_receiver_stream(&mut self) -> &mut flume::r#async::RecvStream<'static, Bytes> {
         &mut self.recv_stream
+    }
+
+    #[cfg(feature = "udp-timeout")]
+    fn get_timeout(&mut self) -> &mut Pin<Box<Sleep>> {
+        &mut self.timeout
     }
 }
 
