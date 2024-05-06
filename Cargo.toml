@@ -2,7 +2,7 @@
 authors = ['LB7666 <acking-you@foxmail.com>']
 description = 'Provides universal stream for TCP and UDP traffic and custom DNS resolution service'
 edition = '2021'
-homepage = 'https://github.com/acking-you/uni-stream'
+repository = 'https://github.com/acking-you/uni-stream'
 license = 'MIT'
 name = 'uni-stream'
 version = '0.1.0'
