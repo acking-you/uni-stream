@@ -138,9 +138,7 @@ mod impl_inner {
         cx: &mut Context,
         buf: &[u8],
     ) -> Poll<Result<usize>> {
-        write_ctx
-            .get_socket()
-            .poll_send_to(cx, buf, *write_ctx.get_peer_addr())
+        write_ctx.get_socket().poll_send(cx, buf)
     }
 
     #[cfg(feature = "udp-timeout")]
