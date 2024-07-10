@@ -11,15 +11,13 @@ use bytes::{Buf, Bytes, BytesMut};
 use hashbrown::HashMap;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::UdpSocket;
-
 #[cfg(feature = "udp-timeout")]
 use tokio::time::Sleep;
 
-#[cfg(feature = "udp-timeout")]
-use crate::udp::impl_inner::get_sleep;
-
 use self::impl_inner::{UdpStreamReadContext, UdpStreamWriteContext};
 use super::addr::{each_addr, ToSocketAddrs};
+#[cfg(feature = "udp-timeout")]
+use crate::udp::impl_inner::get_sleep;
 
 const UDP_CHANNEL_LEN: usize = 100;
 const UDP_BUFFER_SIZE: usize = 16 * 1024;
@@ -61,6 +59,7 @@ mod impl_inner {
     }
 
     pub(super) trait UdpStreamWriteContext {
+        fn is_connect(&self) -> bool;
         fn get_socket(&self) -> &tokio::net::UdpSocket;
         fn get_peer_addr(&self) -> &SocketAddr;
     }
@@ -138,7 +137,13 @@ mod impl_inner {
         cx: &mut Context,
         buf: &[u8],
     ) -> Poll<Result<usize>> {
-        write_ctx.get_socket().poll_send(cx, buf)
+        if write_ctx.is_connect() {
+            write_ctx.get_socket().poll_send(cx, buf)
+        } else {
+            write_ctx
+                .get_socket()
+                .poll_send_to(cx, buf, *write_ctx.get_peer_addr())
+        }
     }
 
     #[cfg(feature = "udp-timeout")]
@@ -253,6 +258,7 @@ impl UdpListener {
                                 );
 
                                 let udp_stream = UdpStream {
+                                    is_connect:false,
                                     local_addr,
                                     peer_addr,
                                     #[cfg(feature = "udp-timeout")]
@@ -321,6 +327,7 @@ impl Drop for TaskJoinHandleGuard {
 /// A UDP stream can either be created by connecting to an endpoint, via the
 /// [`UdpStream::connect`] method, or by [UdpListener::accept] a connection from a listener.
 pub struct UdpStream {
+    is_connect: bool,
     local_addr: SocketAddr,
     peer_addr: SocketAddr,
     socket: Arc<tokio::net::UdpSocket>,
@@ -351,14 +358,14 @@ impl UdpStream {
         };
         let socket = UdpSocket::bind(local_addr).await?;
         socket.connect(&addr).await?;
-        Self::from_tokio(socket).await
+        Self::from_tokio(socket, true).await
     }
 
     /// Creates a new UdpStream from a tokio::net::UdpSocket.
     /// This function is intended to be used to wrap a UDP socket from the tokio library.
     /// Note: The UdpSocket must have the UdpSocket::connect method called before invoking this
     /// function.
-    async fn from_tokio(socket: UdpSocket) -> Result<Self> {
+    async fn from_tokio(socket: UdpSocket, is_connect: bool) -> Result<Self> {
         let socket = Arc::new(socket);
 
         let local_addr = socket.local_addr()?;
@@ -395,6 +402,7 @@ impl UdpStream {
             _handler_guard: Some(TaskJoinHandleGuard(handler)),
             _listener_guard: None,
             remaining: None,
+            is_connect,
         })
     }
 
@@ -408,7 +416,8 @@ impl UdpStream {
         Ok(self.local_addr)
     }
 
-    /// Split into read side and write side to avoid borrow check, note that ownership is not transferred
+    /// Split into read side and write side to avoid borrow check, note that ownership is not
+    /// transferred
     pub fn split(&self) -> (UdpStreamReadHalf<'static>, UdpStreamWriteHalf) {
         (
             UdpStreamReadHalf {
@@ -418,6 +427,7 @@ impl UdpStream {
                 timeout: Box::pin(get_sleep()),
             },
             UdpStreamWriteHalf {
+                is_connect: self.is_connect,
                 socket: &self.socket,
                 peer_addr: self.peer_addr,
             },
@@ -447,6 +457,10 @@ impl UdpStreamWriteContext for std::pin::Pin<&mut UdpStream> {
 
     fn get_peer_addr(&self) -> &SocketAddr {
         &self.peer_addr
+    }
+
+    fn is_connect(&self) -> bool {
+        self.is_connect
     }
 }
 
@@ -505,6 +519,7 @@ impl AsyncRead for UdpStreamReadHalf<'static> {
 
 /// [`UdpStream`] write-side implementation
 pub struct UdpStreamWriteHalf<'a> {
+    is_connect: bool,
     socket: &'a tokio::net::UdpSocket,
     peer_addr: SocketAddr,
 }
@@ -516,6 +531,10 @@ impl UdpStreamWriteContext for std::pin::Pin<&mut UdpStreamWriteHalf<'_>> {
 
     fn get_peer_addr(&self) -> &SocketAddr {
         &self.peer_addr
+    }
+
+    fn is_connect(&self) -> bool {
+        self.is_connect
     }
 }
 
