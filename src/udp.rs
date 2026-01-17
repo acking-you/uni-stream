@@ -1,16 +1,20 @@
 //! Provides a `tokio::TcpStream`-like UDP stream implementation based on `tokio::UdpSocket`.
 
 use std::fmt::Debug;
+use std::future::Future;
 use std::io::{self};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use bytes::{Buf, Bytes, BytesMut};
-use futures::StreamExt;
+use futures::future::poll_fn;
+use futures::Stream;
 use hashbrown::HashMap;
+use kanal::{AsyncReceiver, AsyncSender, ReceiveStreamOwned};
 use socket2::SockRef;
+use std::pin::Pin;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::UdpSocket;
 #[cfg(feature = "udp-timeout")]
@@ -28,6 +32,12 @@ const UDP_BUFFER_SIZE: usize = 65_507;
 const UDP_SOCKET_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 
 type Result<T, E = std::io::Error> = std::result::Result<T, E>;
+
+fn receiver_stream<T: Send + 'static>(
+    receiver: AsyncReceiver<T>,
+) -> Pin<Box<ReceiveStreamOwned<T>>> {
+    Box::pin(receiver.into_stream())
+}
 
 #[cfg(not(target_os = "windows"))]
 /// Tune UDP socket buffer sizes for better throughput.
@@ -71,7 +81,6 @@ mod impl_inner {
 
     #[cfg(feature = "udp-timeout")]
     use futures::FutureExt;
-    use futures::StreamExt;
     #[cfg(feature = "udp-timeout")]
     use once_cell::sync::Lazy;
     #[cfg(feature = "udp-timeout")]
@@ -81,7 +90,7 @@ mod impl_inner {
 
     pub(super) trait UdpStreamReadContext {
         fn get_mut_remaining_bytes(&mut self) -> &mut Option<Bytes>;
-        fn get_receiver_stream(&mut self) -> &mut flume::r#async::RecvStream<'static, Bytes>;
+        fn get_receiver_stream(&mut self) -> &mut Pin<Box<ReceiveStreamOwned<Bytes>>>;
         #[cfg(feature = "udp-timeout")]
         fn get_timeout(&mut self) -> &mut Pin<Box<Sleep>>;
     }
@@ -136,7 +145,7 @@ mod impl_inner {
             return Poll::Ready(Ok(()));
         }
 
-        let remaining = match read_ctx.get_receiver_stream().poll_next_unpin(cx) {
+        let remaining = match read_ctx.get_receiver_stream().as_mut().poll_next(cx) {
             Poll::Ready(Some(mut inner_buf)) => {
                 let remaining = if buf.remaining() < inner_buf.len() {
                     Some(inner_buf.split_off(buf.remaining()))
@@ -215,7 +224,7 @@ pub use impl_inner::set_custom_timeout;
 /// various forms of processing.
 pub struct UdpListener {
     handler: tokio::task::JoinHandle<()>,
-    receiver: flume::Receiver<(UdpStream, SocketAddr)>,
+    receiver: AsyncReceiver<(UdpStream, SocketAddr)>,
     local_addr: SocketAddr,
 }
 
@@ -232,15 +241,16 @@ impl UdpListener {
     }
 
     async fn bind_inner(local_addr: SocketAddr) -> Result<Self> {
-        let (listener_tx, listener_rx) = flume::bounded(UDP_CHANNEL_LEN);
+        let (listener_tx, listener_rx) = kanal::bounded_async(UDP_CHANNEL_LEN);
         let udp_socket = UdpSocket::bind(local_addr).await?;
         tune_udp_socket(&udp_socket);
         let local_addr = udp_socket.local_addr()?;
 
         let handler = tokio::spawn(async move {
-            let mut streams: HashMap<SocketAddr, flume::Sender<Bytes>> = HashMap::new();
+            let mut streams: HashMap<SocketAddr, AsyncSender<Bytes>> = HashMap::new();
             let socket = Arc::new(udp_socket);
-            let (drop_tx, drop_rx) = flume::bounded(10);
+            let (drop_tx, drop_rx) = kanal::bounded_async(10);
+            let mut cleanup_interval = tokio::time::interval(Duration::from_millis(200));
 
             let mut buf = BytesMut::with_capacity(UDP_BUFFER_SIZE * 3);
             loop {
@@ -249,43 +259,54 @@ impl UdpListener {
                 }
                 buf.clear();
                 tokio::select! {
-                    ret = drop_rx.recv_async() => {
-                        let peer_addr = error_get_or_continue!(ret,"UDPListener clean conn");
-                        streams.remove(&peer_addr);
+                    _ = cleanup_interval.tick() => {
+                        loop {
+                            match drop_rx.try_recv() {
+                                Ok(Some(peer_addr)) => {
+                                    streams.remove(&peer_addr);
+                                }
+                                Ok(None) => break,
+                                Err(_) => break,
+                            }
+                        }
                     }
                     ret = socket.recv_buf_from(&mut buf) => {
                         let (len,peer_addr) = error_get_or_continue!(ret,"UdpListener `recv_buf_from`");
                         tracing::debug!("udp listener recv {len} bytes from {peer_addr}");
                         match streams.get(&peer_addr) {
                             Some(tx) => {
-                                if let Err(err) =  tx.send_async(buf.copy_to_bytes(len)).await{
+                                if let Err(err) =  tx.send(buf.copy_to_bytes(len)).await{
                                     tracing::error!("UDPListener send msg to conn, detail:{err}");
                                     streams.remove(&peer_addr);
                                     continue;
                                 }
                             }
                             None => {
-                                let (child_tx, child_rx) = flume::bounded(UDP_CHANNEL_LEN);
+                                let (child_tx, child_rx) = kanal::bounded_async(UDP_CHANNEL_LEN);
                                 // pre send msg
                                 error_get_or_continue!(
-                                    child_tx.send_async(buf.copy_to_bytes(len)).await,
+                                    child_tx.send(buf.copy_to_bytes(len)).await,
                                     "new conn pre send msg"
                                 );
 
                                 let udp_stream = UdpStream {
-                                    is_connect:false,
+                                    is_connect: false,
                                     local_addr,
                                     peer_addr,
                                     #[cfg(feature = "udp-timeout")]
                                     timeout: Box::pin(get_sleep()),
-                                    recv_stream: child_rx.into_stream(),
+                                    recv_stream: receiver_stream(child_rx.clone()),
+                                    receiver: child_rx,
                                     socket: socket.clone(),
                                     _handler_guard: None,
-                                    _listener_guard: Some(ListenerCleanGuard{sender:drop_tx.clone(),peer_addr}),
+                                    _listener_guard: Some(ListenerCleanGuard {
+                                        sender: drop_tx.clone(),
+                                        peer_addr,
+                                    }),
                                     remaining: None,
                                 };
                                 error_get_or_continue!(
-                                    listener_tx.send_async((udp_stream, peer_addr)).await,
+                                    listener_tx.send((udp_stream, peer_addr)).await,
                                     "register UDPStream"
                                 );
                                 streams.insert(peer_addr, child_tx);
@@ -310,7 +331,7 @@ impl UdpListener {
     /// Accepts a new incoming UDP connection.
     pub async fn accept(&self) -> io::Result<(UdpStream, SocketAddr)> {
         self.receiver
-            .recv_async()
+            .recv()
             .await
             .map_err(|e| io::Error::new(io::ErrorKind::BrokenPipe, e))
     }
@@ -321,13 +342,13 @@ struct TaskJoinHandleGuard(tokio::task::JoinHandle<()>);
 
 #[derive(Debug, Clone)]
 struct ListenerCleanGuard {
-    sender: flume::Sender<SocketAddr>,
+    sender: AsyncSender<SocketAddr>,
     peer_addr: SocketAddr,
 }
 
 impl Drop for ListenerCleanGuard {
     fn drop(&mut self) {
-        _ = self.sender.try_send(self.peer_addr);
+        let _ = self.sender.try_send(self.peer_addr);
     }
 }
 
@@ -346,9 +367,10 @@ pub struct UdpStream {
     local_addr: SocketAddr,
     peer_addr: SocketAddr,
     socket: Arc<tokio::net::UdpSocket>,
+    receiver: AsyncReceiver<Bytes>,
     #[cfg(feature = "udp-timeout")]
     timeout: Pin<Box<Sleep>>,
-    recv_stream: flume::r#async::RecvStream<'static, Bytes>,
+    recv_stream: Pin<Box<ReceiveStreamOwned<Bytes>>>,
     remaining: Option<Bytes>,
     _handler_guard: Option<TaskJoinHandleGuard>,
     _listener_guard: Option<ListenerCleanGuard>,
@@ -388,7 +410,7 @@ impl UdpStream {
         let local_addr = socket.local_addr()?;
         let peer_addr = socket.peer_addr()?;
 
-        let (tx, rx) = flume::bounded(UDP_CHANNEL_LEN);
+        let (tx, rx) = kanal::bounded_async(UDP_CHANNEL_LEN);
 
         let socket_inner = socket.clone();
 
@@ -406,7 +428,7 @@ impl UdpStream {
                 if received_addr != peer_addr {
                     continue;
                 }
-                if tx.send_async(buf.copy_to_bytes(len)).await.is_err() {
+                if tx.send(buf.copy_to_bytes(len)).await.is_err() {
                     drop(tx);
                     break;
                 }
@@ -418,7 +440,8 @@ impl UdpStream {
             peer_addr,
             #[cfg(feature = "udp-timeout")]
             timeout: Box::pin(get_sleep()),
-            recv_stream: rx.into_stream(),
+            recv_stream: receiver_stream(rx.clone()),
+            receiver: rx,
             socket,
             _handler_guard: Some(TaskJoinHandleGuard(handler)),
             _listener_guard: None,
@@ -439,10 +462,10 @@ impl UdpStream {
 
     /// Split into read side and write side to avoid borrow check, note that ownership is not
     /// transferred
-    pub fn split(&self) -> (UdpStreamReadHalf<'static>, UdpStreamWriteHalf<'_>) {
+    pub fn split(&self) -> (UdpStreamReadHalf, UdpStreamWriteHalf<'_>) {
         (
             UdpStreamReadHalf {
-                recv_stream: self.recv_stream.clone(),
+                recv_stream: receiver_stream(self.receiver.clone()),
                 remaining: self.remaining.clone(),
                 #[cfg(feature = "udp-timeout")]
                 timeout: Box::pin(get_sleep()),
@@ -500,7 +523,7 @@ impl UdpStreamReadContext for std::pin::Pin<&mut UdpStream> {
         &mut self.remaining
     }
 
-    fn get_receiver_stream(&mut self) -> &mut flume::r#async::RecvStream<'static, Bytes> {
+    fn get_receiver_stream(&mut self) -> &mut Pin<Box<ReceiveStreamOwned<Bytes>>> {
         &mut self.recv_stream
     }
 
@@ -545,19 +568,19 @@ impl AsyncWrite for UdpStream {
 }
 
 /// [`UdpStream`] read-side implementation
-pub struct UdpStreamReadHalf<'a> {
-    recv_stream: flume::r#async::RecvStream<'a, Bytes>,
+pub struct UdpStreamReadHalf {
+    recv_stream: Pin<Box<ReceiveStreamOwned<Bytes>>>,
     remaining: Option<Bytes>,
     #[cfg(feature = "udp-timeout")]
     timeout: Pin<Box<Sleep>>,
 }
 
-impl UdpStreamReadContext for std::pin::Pin<&mut UdpStreamReadHalf<'static>> {
+impl UdpStreamReadContext for std::pin::Pin<&mut UdpStreamReadHalf> {
     fn get_mut_remaining_bytes(&mut self) -> &mut Option<Bytes> {
         &mut self.remaining
     }
 
-    fn get_receiver_stream(&mut self) -> &mut flume::r#async::RecvStream<'static, Bytes> {
+    fn get_receiver_stream(&mut self) -> &mut Pin<Box<ReceiveStreamOwned<Bytes>>> {
         &mut self.recv_stream
     }
 
@@ -572,7 +595,7 @@ impl UdpStreamReadContext for std::pin::Pin<&mut UdpStreamOwnedReadHalf> {
         &mut self.remaining
     }
 
-    fn get_receiver_stream(&mut self) -> &mut flume::r#async::RecvStream<'static, Bytes> {
+    fn get_receiver_stream(&mut self) -> &mut Pin<Box<ReceiveStreamOwned<Bytes>>> {
         &mut self.recv_stream
     }
 
@@ -582,7 +605,7 @@ impl UdpStreamReadContext for std::pin::Pin<&mut UdpStreamOwnedReadHalf> {
     }
 }
 
-impl AsyncRead for UdpStreamReadHalf<'static> {
+impl AsyncRead for UdpStreamReadHalf {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -602,7 +625,7 @@ impl AsyncRead for UdpStreamOwnedReadHalf {
     }
 }
 
-impl UdpStreamReadHalf<'_> {
+impl UdpStreamReadHalf {
     /// Receive a single UDP datagram as an owned buffer.
     pub async fn recv_datagram(&mut self) -> io::Result<Bytes> {
         if self.remaining.is_some() {
@@ -613,27 +636,37 @@ impl UdpStreamReadHalf<'_> {
         }
 
         #[cfg(feature = "udp-timeout")]
-        let result = tokio::select! {
-            _ = self.timeout.as_mut() => {
-                Err(io::Error::new(
+        let result = poll_fn(|cx| {
+            if self.timeout.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!(
                         "UdpStream timeout with duration:{:?}",
                         impl_inner::get_timeout_duration()
                     ),
-                ))
+                )));
             }
-            msg = self.recv_stream.next() => {
-                msg.ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "Broken pipe"))
+            match self.recv_stream.as_mut().poll_next(cx) {
+                Poll::Ready(Some(msg)) => Poll::Ready(Ok(msg)),
+                Poll::Ready(None) => Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "Broken pipe",
+                ))),
+                Poll::Pending => Poll::Pending,
             }
-        };
+        })
+        .await;
 
         #[cfg(not(feature = "udp-timeout"))]
-        let result = self
-            .recv_stream
-            .next()
-            .await
-            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "Broken pipe"));
+        let result = poll_fn(|cx| match self.recv_stream.as_mut().poll_next(cx) {
+            Poll::Ready(Some(msg)) => Poll::Ready(Ok(msg)),
+            Poll::Ready(None) => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "Broken pipe",
+            ))),
+            Poll::Pending => Poll::Pending,
+        })
+        .await;
 
         #[cfg(feature = "udp-timeout")]
         if result.is_ok() {
@@ -648,7 +681,7 @@ impl UdpStreamReadHalf<'_> {
 
 /// [`UdpStream`] owned read-side implementation.
 pub struct UdpStreamOwnedReadHalf {
-    recv_stream: flume::r#async::RecvStream<'static, Bytes>,
+    recv_stream: Pin<Box<ReceiveStreamOwned<Bytes>>>,
     remaining: Option<Bytes>,
     #[cfg(feature = "udp-timeout")]
     timeout: Pin<Box<Sleep>>,
@@ -666,27 +699,37 @@ impl UdpStreamOwnedReadHalf {
         }
 
         #[cfg(feature = "udp-timeout")]
-        let result = tokio::select! {
-            _ = self.timeout.as_mut() => {
-                Err(io::Error::new(
+        let result = poll_fn(|cx| {
+            if self.timeout.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!(
                         "UdpStream timeout with duration:{:?}",
                         impl_inner::get_timeout_duration()
                     ),
-                ))
+                )));
             }
-            msg = self.recv_stream.next() => {
-                msg.ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "Broken pipe"))
+            match self.recv_stream.as_mut().poll_next(cx) {
+                Poll::Ready(Some(msg)) => Poll::Ready(Ok(msg)),
+                Poll::Ready(None) => Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "Broken pipe",
+                ))),
+                Poll::Pending => Poll::Pending,
             }
-        };
+        })
+        .await;
 
         #[cfg(not(feature = "udp-timeout"))]
-        let result = self
-            .recv_stream
-            .next()
-            .await
-            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "Broken pipe"));
+        let result = poll_fn(|cx| match self.recv_stream.as_mut().poll_next(cx) {
+            Poll::Ready(Some(msg)) => Poll::Ready(Ok(msg)),
+            Poll::Ready(None) => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "Broken pipe",
+            ))),
+            Poll::Pending => Poll::Pending,
+        })
+        .await;
 
         #[cfg(feature = "udp-timeout")]
         if result.is_ok() {

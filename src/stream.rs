@@ -117,7 +117,7 @@ impl StreamSplit for TcpStreamImpl {
 }
 
 impl StreamSplit for UdpStreamImpl {
-    type ReaderRef<'a> = UdpStreamReadHalf<'static>;
+    type ReaderRef<'a> = UdpStreamReadHalf;
     type WriterRef<'a>
         = UdpStreamWriteHalf<'a>
     where

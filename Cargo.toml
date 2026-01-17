@@ -5,7 +5,7 @@ edition = '2021'
 repository = 'https://github.com/acking-you/uni-stream'
 license = 'MIT'
 name = 'uni-stream'
-version = '0.3.0'
+version = '0.3.1'
 keywords = ["stream", "udp", "tcp", "ip", "dns"]
 readme = "README.md"
 
@@ -25,9 +25,9 @@ tokio = { version = "1", features = [
     "time",
 ] }
 futures = "0.3.30"
-flume = { version = "0.11.0", default-features = false, features = ["async"] }
 once_cell = "1.18.0"
 trust-dns-resolver = "0.23.2"
+kanal = { git = "https://github.com/acking-you/kanal.git", branch = "dev/pb-mapper" }
 
 [features]
 default = ["udp-timeout"]
