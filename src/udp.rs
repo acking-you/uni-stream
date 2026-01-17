@@ -6,7 +6,6 @@ use std::io::{self};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Duration;
 
 use bytes::{Buf, Bytes, BytesMut};
 use futures::future::poll_fn;
