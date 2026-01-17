@@ -5,7 +5,8 @@ edition = '2021'
 repository = 'https://github.com/acking-you/uni-stream'
 license = 'MIT'
 name = 'uni-stream'
-version = '0.2.0'
+version = '0.3.0'
+readme = "README.md"
 keywords = ["stream", "udp", "tcp", "ip", "dns"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -14,12 +15,14 @@ keywords = ["stream", "udp", "tcp", "ip", "dns"]
 bytes = "1.5.0"
 hashbrown = "0.14.3"
 tracing = "0.1.40"
+socket2 = "0.6.0"
 tokio = { version = "1.36.0", features = [
     "rt",
     "sync",
     "net",
     "macros",
     "io-util",
+    "time",
 ] }
 futures = "0.3.30"
 flume = { version = "0.11.0", default-features = false, features = ["async"] }

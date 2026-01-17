@@ -7,7 +7,7 @@ use uni_stream::{
 /// Udp connections are used in the same way as tcp connections using a customized dns server
 async fn custom_dns_tcp_stream_read<A: ToSocketAddrs + Send>(addr: A) {
     // start tcp connect with custom dns resolver
-    let mut stream = TcpStreamProvider::connect(addr).await.unwrap();
+    let mut stream = TcpStreamProvider::from_addr(addr).await.unwrap();
     stream
         .write_all(b"GET /get HTTP/1.1\r\nHost: httpbin.org\r\nAccept: */*\r\n\r\n")
         .await

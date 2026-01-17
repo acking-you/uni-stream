@@ -1,4 +1,4 @@
-//! Provides a `tokio::TcpStream` like UdpStream implementation based on `tokio::UdpSocket`.
+//! Provides a `tokio::TcpStream`-like UDP stream implementation based on `tokio::UdpSocket`.
 
 use std::fmt::Debug;
 use std::io::{self};
@@ -8,9 +8,13 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use bytes::{Buf, Bytes, BytesMut};
+use futures::StreamExt;
 use hashbrown::HashMap;
+use socket2::SockRef;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::UdpSocket;
+#[cfg(feature = "udp-timeout")]
+use tokio::time::Instant;
 #[cfg(feature = "udp-timeout")]
 use tokio::time::Sleep;
 
@@ -20,9 +24,34 @@ use super::addr::{each_addr, ToSocketAddrs};
 use crate::udp::impl_inner::get_sleep;
 
 const UDP_CHANNEL_LEN: usize = 100;
-const UDP_BUFFER_SIZE: usize = 16 * 1024;
+const UDP_BUFFER_SIZE: usize = 65_507;
+const UDP_SOCKET_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 
 type Result<T, E = std::io::Error> = std::result::Result<T, E>;
+
+#[cfg(not(target_os = "windows"))]
+/// Tune UDP socket buffer sizes for better throughput.
+pub fn tune_udp_socket(socket: &UdpSocket) {
+    let sock_ref = SockRef::from(socket);
+    if let Err(err) = sock_ref.set_recv_buffer_size(UDP_SOCKET_BUFFER_BYTES) {
+        tracing::warn!("failed to set udp recv buffer size: {err}");
+    }
+    if let Err(err) = sock_ref.set_send_buffer_size(UDP_SOCKET_BUFFER_BYTES) {
+        tracing::warn!("failed to set udp send buffer size: {err}");
+    }
+}
+
+#[cfg(target_os = "windows")]
+/// Tune UDP socket buffer sizes for better throughput.
+pub fn tune_udp_socket(socket: &UdpSocket) {
+    let sock_ref = SockRef::from(socket);
+    if let Err(err) = sock_ref.set_recv_buffer_size(UDP_SOCKET_BUFFER_BYTES) {
+        tracing::warn!("failed to set udp recv buffer size: {err}");
+    }
+    if let Err(err) = sock_ref.set_send_buffer_size(UDP_SOCKET_BUFFER_BYTES) {
+        tracing::warn!("failed to set udp send buffer size: {err}");
+    }
+}
 
 macro_rules! error_get_or_continue {
     ($func_call:expr, $msg:expr) => {
@@ -37,7 +66,6 @@ macro_rules! error_get_or_continue {
 }
 
 mod impl_inner {
-
     #[cfg(feature = "udp-timeout")]
     use std::time::Duration;
 
@@ -185,22 +213,6 @@ pub use impl_inner::set_custom_timeout;
 ///
 /// This object can be converted into a stream of incoming connections for
 /// various forms of processing.
-///
-/// # Examples
-///
-/// ```no_run
-/// async fn process_socket<T>(_socket: T) {}
-///
-/// #[tokio::main]
-/// async fn main() -> Result<(), Box<dyn Error>> {
-///     let mut listener = UdpListener::bind(SocketAddr::from_str("127.0.0.1:8080")?).await?;
-///
-///     loop {
-///         let (socket, _) = listener.accept().await?;
-///         process_socket(socket).await;
-///     }
-/// }
-/// ```
 pub struct UdpListener {
     handler: tokio::task::JoinHandle<()>,
     receiver: flume::Receiver<(UdpStream, SocketAddr)>,
@@ -222,6 +234,7 @@ impl UdpListener {
     async fn bind_inner(local_addr: SocketAddr) -> Result<Self> {
         let (listener_tx, listener_rx) = flume::bounded(UDP_CHANNEL_LEN);
         let udp_socket = UdpSocket::bind(local_addr).await?;
+        tune_udp_socket(&udp_socket);
         let local_addr = udp_socket.local_addr()?;
 
         let handler = tokio::spawn(async move {
@@ -234,6 +247,7 @@ impl UdpListener {
                 if buf.capacity() < UDP_BUFFER_SIZE {
                     buf.reserve(UDP_BUFFER_SIZE * 3);
                 }
+                buf.clear();
                 tokio::select! {
                     ret = drop_rx.recv_async() => {
                         let peer_addr = error_get_or_continue!(ret,"UDPListener clean conn");
@@ -241,6 +255,7 @@ impl UdpListener {
                     }
                     ret = socket.recv_buf_from(&mut buf) => {
                         let (len,peer_addr) = error_get_or_continue!(ret,"UdpListener `recv_buf_from`");
+                        tracing::debug!("udp listener recv {len} bytes from {peer_addr}");
                         match streams.get(&peer_addr) {
                             Some(tx) => {
                                 if let Err(err) =  tx.send_async(buf.copy_to_bytes(len)).await{
@@ -357,6 +372,7 @@ impl UdpStream {
             SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
         };
         let socket = UdpSocket::bind(local_addr).await?;
+        tune_udp_socket(&socket);
         socket.connect(&addr).await?;
         Self::from_tokio(socket, true).await
     }
@@ -366,6 +382,7 @@ impl UdpStream {
     /// Note: The UdpSocket must have the UdpSocket::connect method called before invoking this
     /// function.
     async fn from_tokio(socket: UdpSocket, is_connect: bool) -> Result<Self> {
+        tune_udp_socket(&socket);
         let socket = Arc::new(socket);
 
         let local_addr = socket.local_addr()?;
@@ -377,17 +394,21 @@ impl UdpStream {
 
         let handler = tokio::spawn(async move {
             let mut buf = BytesMut::with_capacity(UDP_BUFFER_SIZE);
-            while let Ok((len, received_addr)) = socket_inner.recv_buf_from(&mut buf).await {
+            loop {
+                if buf.capacity() < UDP_BUFFER_SIZE {
+                    buf.reserve(UDP_BUFFER_SIZE * 3);
+                }
+                buf.clear();
+                let (len, received_addr) = match socket_inner.recv_buf_from(&mut buf).await {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
                 if received_addr != peer_addr {
                     continue;
                 }
                 if tx.send_async(buf.copy_to_bytes(len)).await.is_err() {
                     drop(tx);
                     break;
-                }
-
-                if buf.capacity() < UDP_BUFFER_SIZE {
-                    buf.reserve(UDP_BUFFER_SIZE * 3);
                 }
             }
         });
@@ -418,7 +439,7 @@ impl UdpStream {
 
     /// Split into read side and write side to avoid borrow check, note that ownership is not
     /// transferred
-    pub fn split(&self) -> (UdpStreamReadHalf<'static>, UdpStreamWriteHalf) {
+    pub fn split(&self) -> (UdpStreamReadHalf<'static>, UdpStreamWriteHalf<'_>) {
         (
             UdpStreamReadHalf {
                 recv_stream: self.recv_stream.clone(),
@@ -432,6 +453,45 @@ impl UdpStream {
                 peer_addr: self.peer_addr,
             },
         )
+    }
+
+    /// Split into owned read and write halves.
+    pub fn into_split(self) -> (UdpStreamOwnedReadHalf, UdpStreamOwnedWriteHalf) {
+        let guard = Arc::new(UdpStreamGuard {
+            _handler_guard: self._handler_guard,
+            _listener_guard: self._listener_guard,
+        });
+        (
+            UdpStreamOwnedReadHalf {
+                recv_stream: self.recv_stream,
+                remaining: self.remaining,
+                #[cfg(feature = "udp-timeout")]
+                timeout: self.timeout,
+                _guard: guard.clone(),
+            },
+            UdpStreamOwnedWriteHalf {
+                is_connect: self.is_connect,
+                socket: self.socket,
+                peer_addr: self.peer_addr,
+                _guard: guard,
+            },
+        )
+    }
+
+    /// Send a single UDP datagram to the connected peer.
+    pub async fn send_datagram(&self, data: &[u8]) -> io::Result<()> {
+        let sent = if self.is_connect {
+            self.socket.send(data).await?
+        } else {
+            self.socket.send_to(data, self.peer_addr).await?
+        };
+        if sent != data.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "udp datagram truncated",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -507,6 +567,21 @@ impl UdpStreamReadContext for std::pin::Pin<&mut UdpStreamReadHalf<'static>> {
     }
 }
 
+impl UdpStreamReadContext for std::pin::Pin<&mut UdpStreamOwnedReadHalf> {
+    fn get_mut_remaining_bytes(&mut self) -> &mut Option<Bytes> {
+        &mut self.remaining
+    }
+
+    fn get_receiver_stream(&mut self) -> &mut flume::r#async::RecvStream<'static, Bytes> {
+        &mut self.recv_stream
+    }
+
+    #[cfg(feature = "udp-timeout")]
+    fn get_timeout(&mut self) -> &mut Pin<Box<Sleep>> {
+        &mut self.timeout
+    }
+}
+
 impl AsyncRead for UdpStreamReadHalf<'static> {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -514,6 +589,113 @@ impl AsyncRead for UdpStreamReadHalf<'static> {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<Result<()>> {
         impl_inner::poll_read(self, cx, buf)
+    }
+}
+
+impl AsyncRead for UdpStreamOwnedReadHalf {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<Result<()>> {
+        impl_inner::poll_read(self, cx, buf)
+    }
+}
+
+impl UdpStreamReadHalf<'_> {
+    /// Receive a single UDP datagram as an owned buffer.
+    pub async fn recv_datagram(&mut self) -> io::Result<Bytes> {
+        if self.remaining.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "udp stream has buffered bytes; cannot recv datagram",
+            ));
+        }
+
+        #[cfg(feature = "udp-timeout")]
+        let result = tokio::select! {
+            _ = self.timeout.as_mut() => {
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "UdpStream timeout with duration:{:?}",
+                        impl_inner::get_timeout_duration()
+                    ),
+                ))
+            }
+            msg = self.recv_stream.next() => {
+                msg.ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "Broken pipe"))
+            }
+        };
+
+        #[cfg(not(feature = "udp-timeout"))]
+        let result = self
+            .recv_stream
+            .next()
+            .await
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "Broken pipe"));
+
+        #[cfg(feature = "udp-timeout")]
+        if result.is_ok() {
+            self.timeout
+                .as_mut()
+                .reset(Instant::now() + impl_inner::get_timeout_duration());
+        }
+
+        result
+    }
+}
+
+/// [`UdpStream`] owned read-side implementation.
+pub struct UdpStreamOwnedReadHalf {
+    recv_stream: flume::r#async::RecvStream<'static, Bytes>,
+    remaining: Option<Bytes>,
+    #[cfg(feature = "udp-timeout")]
+    timeout: Pin<Box<Sleep>>,
+    _guard: Arc<UdpStreamGuard>,
+}
+
+impl UdpStreamOwnedReadHalf {
+    /// Receive a single UDP datagram as an owned buffer.
+    pub async fn recv_datagram(&mut self) -> io::Result<Bytes> {
+        if self.remaining.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "udp stream has buffered bytes; cannot recv datagram",
+            ));
+        }
+
+        #[cfg(feature = "udp-timeout")]
+        let result = tokio::select! {
+            _ = self.timeout.as_mut() => {
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "UdpStream timeout with duration:{:?}",
+                        impl_inner::get_timeout_duration()
+                    ),
+                ))
+            }
+            msg = self.recv_stream.next() => {
+                msg.ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "Broken pipe"))
+            }
+        };
+
+        #[cfg(not(feature = "udp-timeout"))]
+        let result = self
+            .recv_stream
+            .next()
+            .await
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "Broken pipe"));
+
+        #[cfg(feature = "udp-timeout")]
+        if result.is_ok() {
+            self.timeout
+                .as_mut()
+                .reset(Instant::now() + impl_inner::get_timeout_duration());
+        }
+
+        result
     }
 }
 
@@ -538,6 +720,20 @@ impl UdpStreamWriteContext for std::pin::Pin<&mut UdpStreamWriteHalf<'_>> {
     }
 }
 
+impl UdpStreamWriteContext for std::pin::Pin<&mut UdpStreamOwnedWriteHalf> {
+    fn get_socket(&self) -> &tokio::net::UdpSocket {
+        &self.socket
+    }
+
+    fn get_peer_addr(&self) -> &SocketAddr {
+        &self.peer_addr
+    }
+
+    fn is_connect(&self) -> bool {
+        self.is_connect
+    }
+}
+
 impl AsyncWrite for UdpStreamWriteHalf<'_> {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
         impl_inner::poll_write(self, cx, buf)
@@ -550,4 +746,68 @@ impl AsyncWrite for UdpStreamWriteHalf<'_> {
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<()>> {
         Poll::Ready(Ok(()))
     }
+}
+
+impl AsyncWrite for UdpStreamOwnedWriteHalf {
+    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
+        impl_inner::poll_write(self, cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl UdpStreamWriteHalf<'_> {
+    /// Send a single UDP datagram.
+    pub async fn send_datagram(&self, data: &[u8]) -> io::Result<()> {
+        let sent = if self.is_connect {
+            self.socket.send(data).await?
+        } else {
+            self.socket.send_to(data, self.peer_addr).await?
+        };
+        if sent != data.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "udp datagram truncated",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// [`UdpStream`] owned write-side implementation.
+pub struct UdpStreamOwnedWriteHalf {
+    is_connect: bool,
+    socket: Arc<tokio::net::UdpSocket>,
+    peer_addr: SocketAddr,
+    _guard: Arc<UdpStreamGuard>,
+}
+
+impl UdpStreamOwnedWriteHalf {
+    /// Send a single UDP datagram.
+    pub async fn send_datagram(&self, data: &[u8]) -> io::Result<()> {
+        let sent = if self.is_connect {
+            self.socket.send(data).await?
+        } else {
+            self.socket.send_to(data, self.peer_addr).await?
+        };
+        if sent != data.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "udp datagram truncated",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct UdpStreamGuard {
+    _handler_guard: Option<TaskJoinHandleGuard>,
+    _listener_guard: Option<ListenerCleanGuard>,
 }

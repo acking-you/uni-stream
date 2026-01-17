@@ -10,6 +10,12 @@
 -   **Generic**: `uni-stream` provides an abstraction of UDP and TCP streams, which is exposed through some traits, making it easy for users to make secondary abstractions.
     
 -   **Customizable**: `uni-stream` provides functions that allow users to customize the resolution of dns services for TCP or UDP connections.
+
+-   **Datagram-first UDP API**: UDP is message-oriented. `uni-stream` exposes explicit
+    `recv_datagram` / `send_datagram` APIs so callers can preserve UDP packet boundaries.
+
+-   **Owned split for spawn**: `into_split()` returns owned read/write halves (`'static + Send`)
+    for use in `tokio::spawn` or other cross-task workflows.
     
 ## Usage
 
@@ -19,13 +25,16 @@ To use `uni-stream` in your Rust project, simply add it as a dependency in your 
 [dependencies]
 uni-stream = "*"
 ``` 
-You must also make sure that the Rust version >= 1.75, because [AFIT](https://blog.rust-lang.org/2023/12/28/Rust-1.75.0.html) is required, so you need to add the following `rust-toolchain.toml` to the project root directory:
+You must also make sure that the Rust version >= 1.88 because some dependencies now require a
+newer compiler baseline. Use the following `rust-toolchain.toml` in the project root directory:
 ```toml
 [toolchain]
-channel = "1.75.0"
+channel = "1.88.0"
 ```
 
 Then, you can import and use the library in your Rust code.The following is a generic-based implementation of echo_server:
+
+For UDP datagram-preserving forwarding, see `examples/udp_datagram_echo.rs`.
 
 ```rust
 use tokio::io::AsyncReadExt;
@@ -84,6 +93,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         echo_server::<TcpListenerProvider>("0.0.0.0:8080").await
     }
 }
+```
+
+### Owned split (spawn-friendly)
+When you need to move IO halves into a spawned task, use `into_split()` to get owned halves:
+```rust
+use uni_stream::stream::{StreamSplit, TcpStreamImpl};
+
+async fn handle(stream: TcpStreamImpl) {
+    let (mut reader, mut writer) = stream.into_split();
+    tokio::spawn(async move {
+        let _ = tokio::io::copy(&mut reader, &mut writer).await;
+    });
+}
+```
+
+### UDP datagram interface (important)
+
+TCP is a byte stream; UDP is message-oriented. If you treat UDP like a byte stream, packet boundaries
+are lost and higher-level protocols (e.g. QUIC, DNS, RTP, game traffic) can break.
+
+`uni-stream` exposes explicit datagram APIs on UDP halves:
+
+```
+UdpStreamReadHalf::recv_datagram()  -> returns exactly one UDP packet
+UdpStreamWriteHalf::send_datagram() -> sends exactly one UDP packet
+```
+
+Simple UDP datagram echo (see `examples/udp_datagram_echo.rs`):
+
+```rust
+use uni_stream::udp::UdpListener;
+
+let listener = UdpListener::bind("127.0.0.1:9000").await?;
+let (stream, _) = listener.accept().await?;
+let (mut reader, writer) = stream.split();
+let msg = reader.recv_datagram().await?;
+writer.send_datagram(&msg).await?;
+```
+
+#### Why boundaries matter (short version)
+
+- **TCP**: `read()` can return any number of bytes. It can merge or split packets.
+- **UDP**: each `recv` returns exactly one datagram.
+
+So a UDP tunnel must preserve packet boundaries; `uni-stream` provides the APIs to do that safely.
+
+Visual intuition:
+
+```
+TCP stream:
+  bytes: [A][B][C] -> read() may return [A+B] or [B+C] or [A] then [B+C]
+
+UDP datagrams:
+  recv() returns exactly [A] then exactly [B] then exactly [C]
 ```
 
 Customized dns resolution servers:

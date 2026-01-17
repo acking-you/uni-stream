@@ -28,7 +28,7 @@ impl Drop for TimerTickGurad {
 
 /// test echo delay
 async fn echo_delay<P: StreamProvider, A: ToSocketAddrs + 'static + Send>(addr: A) {
-    let mut stream = P::connect(addr).await.unwrap();
+    let mut stream = P::from_addr(addr).await.unwrap();
     let mut buf = [0; 1024];
     let expected = b"abc";
     for _ in 0..10 {

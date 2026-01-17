@@ -1,52 +1,56 @@
-//! Provides an abstraction of Stream, as well as specific implementations for TCP and UDP
+//! Stream abstractions and implementations for TCP and UDP.
 
 use std::net::SocketAddr;
+#[cfg(not(target_os = "windows"))]
+use std::os::fd::AsFd;
+#[cfg(target_os = "windows")]
+use std::os::windows::io::AsSocket;
+use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::tcp::{ReadHalf, WriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::udp::UdpListener;
-
-use super::addr::{each_addr, ToSocketAddrs};
-use super::udp::{UdpStream, UdpStreamReadHalf, UdpStreamWriteHalf};
+use crate::addr::{each_addr, ToSocketAddrs};
+use crate::udp::{UdpListener, UdpStream, UdpStreamReadHalf, UdpStreamWriteHalf};
 
 type Result<T, E = std::io::Error> = std::result::Result<T, E>;
 
-/// Used to abstract Stream operations, see [`tokio::net::TcpStream`] for details
-pub trait NetworkStream: AsyncReadExt + AsyncWriteExt + Send + Unpin + 'static {
-    /// The reader association type used to represent the read operation
-    type ReaderRef<'a>: AsyncReadExt + Send + Unpin + Send
+/// A stream that can be split into read and write halves.
+pub trait StreamSplit {
+    /// Reader half type.
+    type ReaderRef<'a>: AsyncReadExt + Send + Unpin
     where
         Self: 'a;
-    /// The writer association type used to represent the write operation
-    type WriterRef<'a>: AsyncWriteExt + Send + Unpin + Send
+    /// Writer half type.
+    type WriterRef<'a>: AsyncWriteExt + Send + Unpin
     where
         Self: 'a;
+    /// Owned reader half type.
+    type ReaderOwned: AsyncReadExt + Send + Unpin + 'static;
+    /// Owned writer half type.
+    type WriterOwned: AsyncWriteExt + Send + Unpin + 'static;
 
-    /// Used to get internal specific implementations such as [`UdpStream`]
-    type InnerStream: AsyncReadExt + AsyncWriteExt + Unpin + Send;
-
-    /// Splitting the Stream into a read side and a write side is useful in scenarios where you need to use read and write separately.
+    /// Split into reader and writer halves.
     fn split(&mut self) -> (Self::ReaderRef<'_>, Self::WriterRef<'_>);
 
-    /// Get the internal concrete implementation, note that this operation transfers ownership
-    fn into_inner_stream(self) -> Self::InnerStream;
+    /// Split into owned reader and writer halves.
+    fn into_split(self) -> (Self::ReaderOwned, Self::WriterOwned);
+}
 
-    /// get  local address
-    fn local_addr(&self) -> Result<SocketAddr>;
-
-    /// get  peer address
-    fn peer_addr(&self) -> Result<SocketAddr>;
+/// Marker trait for streams used in the system.
+pub trait NetworkStream:
+    StreamSplit + AsyncReadExt + AsyncWriteExt + Send + Unpin + 'static
+{
 }
 
 macro_rules! gen_stream_impl {
-    ($struct_name:ident, $inner_ty:ty,$doc_string:literal) => {
-        #[doc = $doc_string]
+    ($struct_name:ident, $inner_ty:ty) => {
+        /// Wrapper type used to implement stream traits.
         pub struct $struct_name($inner_ty);
 
         impl $struct_name {
-            /// create new struct
+            /// Create a new wrapper.
             pub fn new(stream: $inner_ty) -> Self {
                 Self(stream)
             }
@@ -88,141 +92,107 @@ macro_rules! gen_stream_impl {
     };
 }
 
-gen_stream_impl!(
-    TcpStreamImpl,
-    TcpStream,
-    "Implementing NetworkStream for TcpStream"
-);
+gen_stream_impl!(TcpStreamImpl, TcpStream);
+gen_stream_impl!(UdpStreamImpl, UdpStream);
 
-gen_stream_impl!(
-    UdpStreamImpl,
-    UdpStream,
-    "Implementing NetworkStream for UdpStream"
-);
-
-impl NetworkStream for TcpStreamImpl {
+impl StreamSplit for TcpStreamImpl {
     type ReaderRef<'a> = ReadHalf<'a>
     where
         Self: 'a;
-
     type WriterRef<'a> = WriteHalf<'a>
     where
         Self: 'a;
-
-    type InnerStream = TcpStream;
+    type ReaderOwned = tokio::net::tcp::OwnedReadHalf;
+    type WriterOwned = tokio::net::tcp::OwnedWriteHalf;
 
     fn split(&mut self) -> (Self::ReaderRef<'_>, Self::WriterRef<'_>) {
         self.0.split()
     }
 
-    fn into_inner_stream(self) -> Self::InnerStream {
-        self.0
-    }
-
-    fn local_addr(&self) -> Result<SocketAddr> {
-        self.0.local_addr()
-    }
-
-    fn peer_addr(&self) -> Result<SocketAddr> {
-        self.0.peer_addr()
+    fn into_split(self) -> (Self::ReaderOwned, Self::WriterOwned) {
+        self.0.into_split()
     }
 }
 
-impl NetworkStream for UdpStreamImpl {
+impl StreamSplit for UdpStreamImpl {
     type ReaderRef<'a> = UdpStreamReadHalf<'static>;
-
     type WriterRef<'a> = UdpStreamWriteHalf<'a>
     where
         Self: 'a;
-
-    type InnerStream = UdpStream;
+    type ReaderOwned = crate::udp::UdpStreamOwnedReadHalf;
+    type WriterOwned = crate::udp::UdpStreamOwnedWriteHalf;
 
     fn split(&mut self) -> (Self::ReaderRef<'_>, Self::WriterRef<'_>) {
         self.0.split()
     }
 
-    fn into_inner_stream(self) -> Self::InnerStream {
-        self.0
-    }
-
-    fn local_addr(&self) -> Result<SocketAddr> {
-        self.0.local_addr()
-    }
-
-    fn peer_addr(&self) -> Result<SocketAddr> {
-        self.0.peer_addr()
+    fn into_split(self) -> (Self::ReaderOwned, Self::WriterOwned) {
+        self.0.into_split()
     }
 }
 
-/// Provides an abstraction for connect
+impl NetworkStream for TcpStreamImpl {}
+impl NetworkStream for UdpStreamImpl {}
+
+/// Provides an abstraction for connect.
 pub trait StreamProvider {
-    /// Stream obtained after connect
+    /// Stream obtained after connect.
     type Item: NetworkStream;
 
-    /// Getting the Stream through a connection,
-    /// the only difference between this process and tokio::net::TcpStream::connect is that
-    /// it will be resolved through a customized dns service
-    fn connect<A: ToSocketAddrs + Send>(
+    /// Create a stream from a socket address or hostname.
+    fn from_addr<A: ToSocketAddrs + Send>(
         addr: A,
     ) -> impl std::future::Future<Output = Result<Self::Item>> + Send;
 }
 
-/// The medium used to get the [`TcpStreamImpl`]
+/// Provider for TCP connections.
 pub struct TcpStreamProvider;
 
 impl StreamProvider for TcpStreamProvider {
     type Item = TcpStreamImpl;
 
-    async fn connect<A: ToSocketAddrs + Send>(addr: A) -> Result<Self::Item> {
-        Ok(TcpStreamImpl(each_addr(addr, TcpStream::connect).await?))
+    async fn from_addr<A: ToSocketAddrs + Send>(addr: A) -> Result<Self::Item> {
+        Ok(TcpStreamImpl(
+            each_addr(addr, TcpStream::connect).await?,
+        ))
     }
 }
 
-/// The medium used to get the [`UdpStreamImpl`]
+/// Provider for UDP connections.
 pub struct UdpStreamProvider;
 
 impl StreamProvider for UdpStreamProvider {
     type Item = UdpStreamImpl;
 
-    async fn connect<A: ToSocketAddrs + Send>(addr: A) -> Result<Self::Item> {
+    async fn from_addr<A: ToSocketAddrs + Send>(addr: A) -> Result<Self::Item> {
         Ok(UdpStreamImpl(UdpStream::connect(addr).await?))
     }
 }
 
-/// Provides an abstraction for bind
+/// Provides an abstraction for bind.
 pub trait ListenerProvider {
-    /// Listener obtained after bind
+    /// Listener obtained after bind.
     type Listener: StreamAccept + 'static;
 
-    /// Getting the Listener through a binding,
-    /// the only difference between this process and `tokio::net::TcpListener::bind` is that
-    /// it will be resolved through a customized dns service
+    /// Bind a listener from address/hostname.
     fn bind<A: ToSocketAddrs + Send>(
         addr: A,
     ) -> impl std::future::Future<Output = Result<Self::Listener>> + Send;
 }
 
-/// Abstractions for Listener-provided operations
+/// Abstractions for listener-provided operations.
 pub trait StreamAccept {
-    /// Stream obtained after accept
+    /// Stream obtained after accept.
     type Item: NetworkStream;
 
-    /// Listener waits to get new Stream
+    /// Listener waits to get new Stream.
     fn accept(&self) -> impl std::future::Future<Output = Result<(Self::Item, SocketAddr)>> + Send;
 }
 
-/// The medium used to get the [`TcpListenerImpl`]
+/// Provider for TCP listeners.
 pub struct TcpListenerProvider;
 
-impl ListenerProvider for TcpListenerProvider {
-    type Listener = TcpListenerImpl;
-
-    async fn bind<A: ToSocketAddrs + Send>(addr: A) -> Result<Self::Listener> {
-        Ok(TcpListenerImpl(each_addr(addr, TcpListener::bind).await?))
-    }
-}
-
-/// Implementing [`StreamAccept`] for TcpListener
+/// TCP listener wrapper.
 pub struct TcpListenerImpl(TcpListener);
 
 impl StreamAccept for TcpListenerImpl {
@@ -234,18 +204,18 @@ impl StreamAccept for TcpListenerImpl {
     }
 }
 
-/// The medium used to get the [`TcpListenerImpl`]
-pub struct UdpListenerProvider;
-
-impl ListenerProvider for UdpListenerProvider {
-    type Listener = UdpListenerImpl;
+impl ListenerProvider for TcpListenerProvider {
+    type Listener = TcpListenerImpl;
 
     async fn bind<A: ToSocketAddrs + Send>(addr: A) -> Result<Self::Listener> {
-        Ok(UdpListenerImpl(UdpListener::bind(addr).await?))
+        Ok(TcpListenerImpl(each_addr(addr, TcpListener::bind).await?))
     }
 }
 
-/// Implementing [`StreamAccept`] for [`UdpListener`]
+/// Provider for UDP listeners.
+pub struct UdpListenerProvider;
+
+/// UDP listener wrapper.
 pub struct UdpListenerImpl(UdpListener);
 
 impl StreamAccept for UdpListenerImpl {
@@ -255,4 +225,66 @@ impl StreamAccept for UdpListenerImpl {
         let (stream, addr) = self.0.accept().await?;
         Ok((UdpStreamImpl::new(stream), addr))
     }
+}
+
+impl ListenerProvider for UdpListenerProvider {
+    type Listener = UdpListenerImpl;
+
+    async fn bind<A: ToSocketAddrs + Send>(addr: A) -> Result<Self::Listener> {
+        Ok(UdpListenerImpl(UdpListener::bind(addr).await?))
+    }
+}
+
+/// How long it takes for TCP to start sending keepalive probe packets when no data is exchanged.
+const TCP_KEEPALIVE_TIME: Duration = Duration::from_secs(20);
+/// Time interval between two consecutive keepalive probe packets.
+const TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
+/// The number of times a keepalive probe packet is performed to be sent.
+#[cfg(not(target_os = "windows"))]
+const TCP_KEEPALIVE_PROBES: u32 = 3;
+
+/// Enable TCP keepalive on a socket.
+#[cfg(not(target_os = "windows"))]
+pub fn set_tcp_keep_alive<S: AsFd>(stream: &S) -> std::result::Result<(), std::io::Error> {
+    let sock_ref = socket2::SockRef::from(stream);
+    let mut ka = socket2::TcpKeepalive::new();
+    ka = ka.with_time(TCP_KEEPALIVE_TIME);
+    ka = ka.with_interval(TCP_KEEPALIVE_INTERVAL);
+    ka = ka.with_retries(TCP_KEEPALIVE_PROBES);
+    sock_ref.set_tcp_keepalive(&ka)
+}
+
+/// Enable TCP keepalive on a socket.
+#[cfg(target_os = "windows")]
+pub fn set_tcp_keep_alive<S: AsSocket>(stream: &S) -> std::result::Result<(), std::io::Error> {
+    let sock_ref = socket2::SockRef::from(stream);
+    let mut ka = socket2::TcpKeepalive::new();
+    ka = ka.with_time(TCP_KEEPALIVE_TIME);
+    ka = ka.with_interval(TCP_KEEPALIVE_INTERVAL);
+    sock_ref.set_tcp_keepalive(&ka)
+}
+
+/// Disable Nagle's algorithm to reduce latency for small packets.
+#[cfg(not(target_os = "windows"))]
+pub fn set_tcp_nodelay<S: AsFd>(stream: &S) -> std::result::Result<(), std::io::Error> {
+    let sock_ref = socket2::SockRef::from(stream);
+    sock_ref.set_tcp_nodelay(true)
+}
+
+/// Disable Nagle's algorithm to reduce latency for small packets.
+#[cfg(target_os = "windows")]
+pub fn set_tcp_nodelay<S: AsSocket>(stream: &S) -> std::result::Result<(), std::io::Error> {
+    let sock_ref = socket2::SockRef::from(stream);
+    sock_ref.set_tcp_nodelay(true)
+}
+
+/// Resolve a single socket address from input.
+pub async fn got_one_socket_addr<A: ToSocketAddrs>(addr: A) -> Result<SocketAddr> {
+    let mut iter = addr.to_socket_addrs().await?;
+    iter.next().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "could not resolve to any addresses",
+        )
+    })
 }
