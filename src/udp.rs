@@ -250,7 +250,7 @@ impl UdpListener {
             let mut streams: HashMap<SocketAddr, AsyncSender<Bytes>> = HashMap::new();
             let socket = Arc::new(udp_socket);
             let (drop_tx, drop_rx) = kanal::bounded_async(10);
-            let mut cleanup_interval = tokio::time::interval(Duration::from_millis(200));
+            let mut drop_buf = Vec::with_capacity(10);
 
             let mut buf = BytesMut::with_capacity(UDP_BUFFER_SIZE * 3);
             loop {
@@ -259,14 +259,16 @@ impl UdpListener {
                 }
                 buf.clear();
                 tokio::select! {
-                    _ = cleanup_interval.tick() => {
-                        loop {
-                            match drop_rx.try_recv() {
-                                Ok(Some(peer_addr)) => {
+                    result = drop_rx.drain_into_blocking(&mut drop_buf) => {
+                        match result {
+                            Ok(_) => {
+                                for peer_addr in drop_buf.drain(..) {
                                     streams.remove(&peer_addr);
                                 }
-                                Ok(None) => break,
-                                Err(_) => break,
+                            }
+                            Err(err) => {
+                                tracing::error!("UdpListener cleanup recv error: {err}");
+                                drop_buf.clear();
                             }
                         }
                     }
