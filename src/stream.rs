@@ -96,10 +96,12 @@ gen_stream_impl!(TcpStreamImpl, TcpStream);
 gen_stream_impl!(UdpStreamImpl, UdpStream);
 
 impl StreamSplit for TcpStreamImpl {
-    type ReaderRef<'a> = ReadHalf<'a>
+    type ReaderRef<'a>
+        = ReadHalf<'a>
     where
         Self: 'a;
-    type WriterRef<'a> = WriteHalf<'a>
+    type WriterRef<'a>
+        = WriteHalf<'a>
     where
         Self: 'a;
     type ReaderOwned = tokio::net::tcp::OwnedReadHalf;
@@ -116,7 +118,8 @@ impl StreamSplit for TcpStreamImpl {
 
 impl StreamSplit for UdpStreamImpl {
     type ReaderRef<'a> = UdpStreamReadHalf<'static>;
-    type WriterRef<'a> = UdpStreamWriteHalf<'a>
+    type WriterRef<'a>
+        = UdpStreamWriteHalf<'a>
     where
         Self: 'a;
     type ReaderOwned = crate::udp::UdpStreamOwnedReadHalf;
@@ -152,9 +155,7 @@ impl StreamProvider for TcpStreamProvider {
     type Item = TcpStreamImpl;
 
     async fn from_addr<A: ToSocketAddrs + Send>(addr: A) -> Result<Self::Item> {
-        Ok(TcpStreamImpl(
-            each_addr(addr, TcpStream::connect).await?,
-        ))
+        Ok(TcpStreamImpl(each_addr(addr, TcpStream::connect).await?))
     }
 }
 
