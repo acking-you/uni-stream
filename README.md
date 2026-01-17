@@ -36,7 +36,7 @@ Then, you can import and use the library in your Rust code.The following is a ge
 
 For UDP datagram-preserving forwarding, see `examples/udp_datagram_echo.rs`.
 
-```rust
+```rust,no_run
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use uni_stream::stream::ListenerProvider;
@@ -52,7 +52,7 @@ async fn echo_server<P: ListenerProvider>(
     loop {
         // Accept incoming connections
         let (mut stream, addr) = listener.accept().await?;
-        println!("Connected from {}", addr);
+        println!("Connected from {addr}");
 
         // Process each connection concurrently
         tokio::spawn(async move {
@@ -62,7 +62,7 @@ async fn echo_server<P: ListenerProvider>(
                 let n = match stream.read(&mut buf).await {
                     Ok(n) => n,
                     Err(e) => {
-                        println!("Error reading: {}", e);
+                        println!("Error reading: {e}");
                         return;
                     }
                 };
@@ -74,11 +74,11 @@ async fn echo_server<P: ListenerProvider>(
 
                 // Echo data back to client
                 if let Err(e) = stream.write_all(&buf[..n]).await {
-                    println!("Error writing: {}", e);
+                    println!("Error writing: {e}");
                     return;
                 }
 
-                println!("Echoed {} bytes to {}", n, addr);
+                println!("Echoed {n} bytes to {addr}");
             }
         });
     }
@@ -97,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Owned split (spawn-friendly)
 When you need to move IO halves into a spawned task, use `into_split()` to get owned halves:
-```rust
+```rust,no_run
 use uni_stream::stream::{StreamSplit, TcpStreamImpl};
 
 async fn handle(stream: TcpStreamImpl) {
@@ -115,21 +115,26 @@ are lost and higher-level protocols (e.g. QUIC, DNS, RTP, game traffic) can brea
 
 `uni-stream` exposes explicit datagram APIs on UDP halves:
 
-```
+```text
 UdpStreamReadHalf::recv_datagram()  -> returns exactly one UDP packet
 UdpStreamWriteHalf::send_datagram() -> sends exactly one UDP packet
 ```
 
 Simple UDP datagram echo (see `examples/udp_datagram_echo.rs`):
 
-```rust
+```rust,no_run
+use std::error::Error;
 use uni_stream::udp::UdpListener;
 
-let listener = UdpListener::bind("127.0.0.1:9000").await?;
-let (stream, _) = listener.accept().await?;
-let (mut reader, writer) = stream.split();
-let msg = reader.recv_datagram().await?;
-writer.send_datagram(&msg).await?;
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let listener = UdpListener::bind("127.0.0.1:9000").await?;
+    let (stream, _) = listener.accept().await?;
+    let (mut reader, writer) = stream.split();
+    let msg = reader.recv_datagram().await?;
+    writer.send_datagram(&msg).await?;
+    Ok(())
+}
 ```
 
 #### Why boundaries matter (short version)
@@ -141,7 +146,7 @@ So a UDP tunnel must preserve packet boundaries; `uni-stream` provides the APIs 
 
 Visual intuition:
 
-```
+```text
 TCP stream:
   bytes: [A][B][C] -> read() may return [A+B] or [B+C] or [A] then [B+C]
 
@@ -150,19 +155,22 @@ UDP datagrams:
 ```
 
 Customized dns resolution servers:
-```rust
+```rust,no_run
 use uni_stream::addr::set_custom_dns_server;
 // use google and alibaba dns server
 set_custom_dns_server(&["8.8.8.8".parse().unwrap(), "233.5.5.5".parse().unwrap()]).unwrap();
 ```
 
 Customize Udp Timeout:
-```rust
+```rust,no_run
 use uni_stream::udp::set_custom_timeout;
+use std::time::Duration;
+
+let timeout = Duration::from_secs(5);
 set_custom_timeout(timeout);
 ```
 Or don't set any timeout on `UdpStream`
-```rust
+```toml
 [dependencies]
 uni-stream = { version = "0.1.0", default-features = false }
 ```
