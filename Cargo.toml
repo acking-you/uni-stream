@@ -6,17 +6,17 @@ repository = 'https://github.com/acking-you/uni-stream'
 license = 'MIT'
 name = 'uni-stream'
 version = '0.3.0'
-readme = "README.md"
 keywords = ["stream", "udp", "tcp", "ip", "dns"]
+readme = "README.md"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bytes = "1.5.0"
-hashbrown = "0.14.3"
+bytes = "1.11.0"
+hashbrown = "0.16"
 tracing = "0.1.40"
 socket2 = "0.6.0"
-tokio = { version = "1.36.0", features = [
+tokio = { version = "1", features = [
     "rt",
     "sync",
     "net",
@@ -32,3 +32,7 @@ trust-dns-resolver = "0.23.2"
 [features]
 default = ["udp-timeout"]
 udp-timeout = []
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
