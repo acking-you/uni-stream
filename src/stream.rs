@@ -240,10 +240,6 @@ impl ListenerProvider for UdpListenerProvider {
 const TCP_KEEPALIVE_TIME: Duration = Duration::from_secs(20);
 /// Time interval between two consecutive keepalive probe packets.
 const TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
-/// The number of times a keepalive probe packet is performed to be sent.
-#[cfg(not(target_os = "windows"))]
-const TCP_KEEPALIVE_PROBES: u32 = 3;
-
 /// Enable TCP keepalive on a socket.
 #[cfg(not(target_os = "windows"))]
 pub fn set_tcp_keep_alive<S: AsFd>(stream: &S) -> std::result::Result<(), std::io::Error> {
@@ -251,7 +247,6 @@ pub fn set_tcp_keep_alive<S: AsFd>(stream: &S) -> std::result::Result<(), std::i
     let mut ka = socket2::TcpKeepalive::new();
     ka = ka.with_time(TCP_KEEPALIVE_TIME);
     ka = ka.with_interval(TCP_KEEPALIVE_INTERVAL);
-    ka = ka.with_retries(TCP_KEEPALIVE_PROBES);
     sock_ref.set_tcp_keepalive(&ka)
 }
 
