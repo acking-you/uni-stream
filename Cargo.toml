@@ -27,7 +27,7 @@ tokio = { version = "1", features = [
 futures = "0.3.30"
 once_cell = "1.18.0"
 trust-dns-resolver = "0.23.2"
-kanal = { git = "https://github.com/acking-you/kanal.git", branch = "dev/pb-mapper" }
+kanal = { version = "0.2.0-beta2", git = "https://github.com/acking-you/kanal.git", branch = "dev/pb-mapper" }
 
 [features]
 default = ["udp-timeout"]
