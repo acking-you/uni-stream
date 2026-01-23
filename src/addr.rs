@@ -8,8 +8,9 @@ use std::task::{ready, Context, Poll};
 
 use once_cell::sync::Lazy;
 use tokio::task::JoinHandle;
-use trust_dns_resolver::config::{NameServerConfigGroup, ResolverConfig, ResolverOpts};
-use trust_dns_resolver::Resolver;
+use hickory_resolver::config::{NameServerConfigGroup, ResolverConfig, ResolverOpts};
+use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::TokioResolver;
 
 type Result<T, E = std::io::Error> = std::result::Result<T, E>;
 type ReadyFuture<T> = future::Ready<Result<T>>;
@@ -295,17 +296,17 @@ static DNS_SERVER_GROUP: Lazy<RwLock<Vec<IpAddr>>> =
 const DNS_QUERY_PORT: u16 = 53;
 
 #[inline]
-fn get_custom_resolver() -> Result<Resolver> {
+fn get_custom_resolver() -> Result<TokioResolver> {
     let dns_group = try_ret!(DNS_SERVER_GROUP.read(), "read dns server");
-    Resolver::new(
-        ResolverConfig::from_parts(
-            None,
-            vec![],
-            NameServerConfigGroup::from_ips_clear(&dns_group, DNS_QUERY_PORT, true),
-        ),
-        ResolverOpts::default(),
-    )
-    .map_err(|e| invalid_input!(format!("create custom resolver error:{e}")))
+    let config = ResolverConfig::from_parts(
+        None,
+        vec![],
+        NameServerConfigGroup::from_ips_clear(&dns_group, DNS_QUERY_PORT, true),
+    );
+    let mut builder =
+        TokioResolver::builder_with_config(config, TokioConnectionProvider::default());
+    *builder.options_mut() = ResolverOpts::default();
+    Ok(builder.build())
 }
 
 /// Set up DNS servers, use `DEFAULT_DNS_SERVER_GROUP` by default
@@ -334,7 +335,7 @@ pub async fn get_ip_addrs(s: &str) -> Result<Vec<IpAddr>> {
 /// Note: must run as async runtime,such as [`tokio::task::spawn_blocking`]
 fn get_ip_addrs_inner(s: &str) -> Result<Vec<IpAddr>> {
     thread_local! {
-        static RESOLVER:Option<Resolver> = {
+        static RESOLVER:Option<TokioResolver> = {
             match get_custom_resolver(){
                 Ok(v) => Some(v),
                 Err(e) => {
@@ -344,10 +345,14 @@ fn get_ip_addrs_inner(s: &str) -> Result<Vec<IpAddr>> {
             }
         };
     }
-    let result = RESOLVER.with(|r| r.as_ref().map(|r| r.lookup_ip(s)));
-    try_opt!(result, "custom resolver not exist")
-        .map(|v| v.into_iter().collect())
-        .map_err(|e| invalid_input!(e))
+    let resolver = RESOLVER.with(|r| r.clone());
+    let resolver = try_opt!(resolver, "custom resolver not exist");
+    let handle = tokio::runtime::Handle::try_current()
+        .map_err(|_| invalid_input!("tokio runtime not found"))?;
+    let lookup = handle
+        .block_on(resolver.lookup_ip(s))
+        .map_err(|e| invalid_input!(e))?;
+    Ok(lookup.into_iter().collect())
 }
 
 /// Resolving domain and port to get `SocketAddr`
