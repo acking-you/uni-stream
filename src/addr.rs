@@ -6,11 +6,11 @@ use std::pin::Pin;
 use std::sync::RwLock;
 use std::task::{ready, Context, Poll};
 
-use once_cell::sync::Lazy;
-use tokio::task::JoinHandle;
 use hickory_resolver::config::{NameServerConfigGroup, ResolverConfig, ResolverOpts};
 use hickory_resolver::name_server::TokioConnectionProvider;
 use hickory_resolver::TokioResolver;
+use once_cell::sync::Lazy;
+use tokio::task::JoinHandle;
 
 type Result<T, E = std::io::Error> = std::result::Result<T, E>;
 type ReadyFuture<T> = future::Ready<Result<T>>;
