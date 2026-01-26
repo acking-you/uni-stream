@@ -5,7 +5,7 @@ edition = '2021'
 repository = 'https://github.com/acking-you/uni-stream'
 license = 'MIT'
 name = 'uni-stream'
-version = '0.3.3'
+version = '0.3.4'
 keywords = ["stream", "udp", "tcp", "ip", "dns"]
 readme = "README.md"
 
