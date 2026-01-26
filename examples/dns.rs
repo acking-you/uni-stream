@@ -1,8 +1,6 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use uni_stream::{
-    addr::{get_ip_addrs, set_custom_dns_server, ToSocketAddrs},
-    stream::{StreamProvider, TcpStreamProvider},
-};
+use uni_stream::addr::{get_ip_addrs, set_custom_dns_server, ToSocketAddrs};
+use uni_stream::stream::{StreamProvider, TcpStreamProvider};
 
 /// Udp connections are used in the same way as tcp connections using a customized dns server
 async fn custom_dns_tcp_stream_read<A: ToSocketAddrs + Send>(addr: A) {

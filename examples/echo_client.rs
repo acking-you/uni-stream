@@ -1,10 +1,8 @@
 use std::time::Instant;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use uni_stream::{
-    addr::ToSocketAddrs,
-    stream::{StreamProvider, TcpStreamProvider, UdpStreamProvider},
-};
+use uni_stream::addr::ToSocketAddrs;
+use uni_stream::stream::{StreamProvider, TcpStreamProvider, UdpStreamProvider};
 
 struct TimerTickGurad {
     ins: Instant,

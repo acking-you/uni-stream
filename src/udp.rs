@@ -4,6 +4,7 @@ use std::fmt::Debug;
 use std::future::Future;
 use std::io::{self};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -13,7 +14,6 @@ use futures::Stream;
 use hashbrown::HashMap;
 use kanal_plus::{AsyncReceiver, AsyncSender, ReceiveStreamOwned};
 use socket2::SockRef;
-use std::pin::Pin;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::UdpSocket;
 #[cfg(feature = "udp-timeout")]

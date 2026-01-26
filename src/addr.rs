@@ -3,13 +3,13 @@
 use std::future::{self, Future};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::pin::Pin;
-use std::sync::RwLock;
 use std::task::{ready, Context, Poll};
 
 use hickory_resolver::config::{NameServerConfigGroup, ResolverConfig, ResolverOpts};
 use hickory_resolver::name_server::TokioConnectionProvider;
 use hickory_resolver::TokioResolver;
 use once_cell::sync::Lazy;
+use parking_lot::RwLock;
 use tokio::task::JoinHandle;
 
 type Result<T, E = std::io::Error> = std::result::Result<T, E>;
@@ -26,15 +26,6 @@ macro_rules! try_opt {
         match $call {
             Some(v) => v,
             None => Err(invalid_input!($msg))?,
-        }
-    };
-}
-
-macro_rules! try_ret {
-    ($call:expr, $msg:expr) => {
-        match $call {
-            Ok(v) => v,
-            Err(e) => Err(invalid_input!(format!("{} ,detail:{e}", $msg)))?,
         }
     };
 }
@@ -297,7 +288,7 @@ const DNS_QUERY_PORT: u16 = 53;
 
 #[inline]
 fn get_custom_resolver() -> Result<TokioResolver> {
-    let dns_group = try_ret!(DNS_SERVER_GROUP.read(), "read dns server");
+    let dns_group = DNS_SERVER_GROUP.read();
     let config = ResolverConfig::from_parts(
         None,
         vec![],
@@ -313,9 +304,7 @@ fn get_custom_resolver() -> Result<TokioResolver> {
 /// Note: must be called before the first network connection to be effective
 #[inline]
 pub fn set_custom_dns_server(dns_addrs: &[IpAddr]) -> Result<()> {
-    let mut writer = DNS_SERVER_GROUP
-        .write()
-        .map_err(|e| invalid_input!(format!("get dns server writer, detail:{e}")))?;
+    let mut writer = DNS_SERVER_GROUP.write();
     let servers: &mut Vec<IpAddr> = writer.as_mut();
     servers.clear();
     dns_addrs.iter().for_each(|&a| servers.push(a));

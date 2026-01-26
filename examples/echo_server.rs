@@ -1,9 +1,7 @@
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncWriteExt;
-use uni_stream::stream::ListenerProvider;
-use uni_stream::stream::StreamAccept;
-use uni_stream::stream::TcpListenerProvider;
-use uni_stream::stream::UdpListenerProvider;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use uni_stream::stream::{
+    ListenerProvider, StreamAccept, TcpListenerProvider, UdpListenerProvider,
+};
 
 async fn echo_server<P: ListenerProvider>(
     server_addr: &str,

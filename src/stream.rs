@@ -96,16 +96,16 @@ gen_stream_impl!(TcpStreamImpl, TcpStream);
 gen_stream_impl!(UdpStreamImpl, UdpStream);
 
 impl StreamSplit for TcpStreamImpl {
+    type ReaderOwned = tokio::net::tcp::OwnedReadHalf;
     type ReaderRef<'a>
         = ReadHalf<'a>
     where
         Self: 'a;
+    type WriterOwned = tokio::net::tcp::OwnedWriteHalf;
     type WriterRef<'a>
         = WriteHalf<'a>
     where
         Self: 'a;
-    type ReaderOwned = tokio::net::tcp::OwnedReadHalf;
-    type WriterOwned = tokio::net::tcp::OwnedWriteHalf;
 
     fn split(&mut self) -> (Self::ReaderRef<'_>, Self::WriterRef<'_>) {
         self.0.split()
@@ -117,13 +117,13 @@ impl StreamSplit for TcpStreamImpl {
 }
 
 impl StreamSplit for UdpStreamImpl {
+    type ReaderOwned = crate::udp::UdpStreamOwnedReadHalf;
     type ReaderRef<'a> = UdpStreamReadHalf;
+    type WriterOwned = crate::udp::UdpStreamOwnedWriteHalf;
     type WriterRef<'a>
         = UdpStreamWriteHalf<'a>
     where
         Self: 'a;
-    type ReaderOwned = crate::udp::UdpStreamOwnedReadHalf;
-    type WriterOwned = crate::udp::UdpStreamOwnedWriteHalf;
 
     fn split(&mut self) -> (Self::ReaderRef<'_>, Self::WriterRef<'_>) {
         self.0.split()
