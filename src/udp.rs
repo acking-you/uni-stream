@@ -11,7 +11,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use futures::future::poll_fn;
 use futures::Stream;
 use hashbrown::HashMap;
-use kanal::{AsyncReceiver, AsyncSender, ReceiveStreamOwned};
+use kanal_plus::{AsyncReceiver, AsyncSender, ReceiveStreamOwned};
 use socket2::SockRef;
 use std::pin::Pin;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -240,7 +240,7 @@ impl UdpListener {
     }
 
     async fn bind_inner(local_addr: SocketAddr) -> Result<Self> {
-        let (listener_tx, listener_rx) = kanal::bounded_async(UDP_CHANNEL_LEN);
+        let (listener_tx, listener_rx) = kanal_plus::bounded_async(UDP_CHANNEL_LEN);
         let udp_socket = UdpSocket::bind(local_addr).await?;
         tune_udp_socket(&udp_socket);
         let local_addr = udp_socket.local_addr()?;
@@ -248,7 +248,7 @@ impl UdpListener {
         let handler = tokio::spawn(async move {
             let mut streams: HashMap<SocketAddr, AsyncSender<Bytes>> = HashMap::new();
             let socket = Arc::new(udp_socket);
-            let (drop_tx, drop_rx) = kanal::bounded_async(10);
+            let (drop_tx, drop_rx) = kanal_plus::bounded_async(10);
             let mut drop_buf = Vec::with_capacity(10);
 
             let mut buf = BytesMut::with_capacity(UDP_BUFFER_SIZE * 3);
@@ -283,7 +283,7 @@ impl UdpListener {
                                 }
                             }
                             None => {
-                                let (child_tx, child_rx) = kanal::bounded_async(UDP_CHANNEL_LEN);
+                                let (child_tx, child_rx) = kanal_plus::bounded_async(UDP_CHANNEL_LEN);
                                 // pre send msg
                                 error_get_or_continue!(
                                     child_tx.send(buf.copy_to_bytes(len)).await,
@@ -411,7 +411,7 @@ impl UdpStream {
         let local_addr = socket.local_addr()?;
         let peer_addr = socket.peer_addr()?;
 
-        let (tx, rx) = kanal::bounded_async(UDP_CHANNEL_LEN);
+        let (tx, rx) = kanal_plus::bounded_async(UDP_CHANNEL_LEN);
 
         let socket_inner = socket.clone();
 
