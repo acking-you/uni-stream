@@ -2,10 +2,11 @@
 authors = ['LB7666 <acking-you@foxmail.com>']
 description = 'Provides universal stream for TCP and UDP traffic and custom DNS resolution service'
 edition = '2021'
+rust-version = '1.88'
 repository = 'https://github.com/acking-you/uni-stream'
 license = 'MIT'
 name = 'uni-stream'
-version = '0.3.4'
+version = '0.3.5'
 keywords = ["stream", "udp", "tcp", "ip", "dns"]
 readme = "README.md"
 
@@ -26,7 +27,7 @@ tokio = { version = "1", features = [
 ] }
 futures = "0.3.30"
 once_cell = "1.18.0"
-hickory-resolver = "0.26.0-alpha.1"
+hickory-resolver = "0.26.1"
 kanal-plus = "0.2.0"
 parking_lot = "0.12"
 

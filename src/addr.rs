@@ -5,8 +5,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV
 use std::pin::Pin;
 use std::task::{ready, Context, Poll};
 
-use hickory_resolver::config::{NameServerConfigGroup, ResolverConfig, ResolverOpts};
-use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::TokioResolver;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
@@ -284,20 +284,23 @@ const DEFAULT_DNS_SERVER_GROUP: &[IpAddr] = &[
 static DNS_SERVER_GROUP: Lazy<RwLock<Vec<IpAddr>>> =
     Lazy::new(|| RwLock::new(DEFAULT_DNS_SERVER_GROUP.to_vec()));
 
-const DNS_QUERY_PORT: u16 = 53;
-
 #[inline]
 fn get_custom_resolver() -> Result<TokioResolver> {
     let dns_group = DNS_SERVER_GROUP.read();
     let config = ResolverConfig::from_parts(
         None,
         vec![],
-        NameServerConfigGroup::from_ips_clear(&dns_group, DNS_QUERY_PORT, true),
+        dns_group
+            .iter()
+            .copied()
+            .map(NameServerConfig::udp_and_tcp)
+            .collect(),
     );
-    let mut builder =
-        TokioResolver::builder_with_config(config, TokioConnectionProvider::default());
+    let mut builder = TokioResolver::builder_with_config(config, TokioRuntimeProvider::default());
     *builder.options_mut() = ResolverOpts::default();
-    Ok(builder.build())
+    builder
+        .build()
+        .map_err(|error| invalid_input!(format!("create custom resolver error:{error}")))
 }
 
 /// Set up DNS servers, use `DEFAULT_DNS_SERVER_GROUP` by default
@@ -341,7 +344,7 @@ fn get_ip_addrs_inner(s: &str) -> Result<Vec<IpAddr>> {
     let lookup = handle
         .block_on(resolver.lookup_ip(s))
         .map_err(|e| invalid_input!(e))?;
-    Ok(lookup.into_iter().collect())
+    Ok(lookup.iter().collect())
 }
 
 /// Resolving domain and port to get `SocketAddr`
@@ -405,4 +408,17 @@ where
             "could not resolve to any addresses",
         )
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::get_custom_resolver;
+
+    #[tokio::test]
+    async fn builds_custom_resolver_with_stable_hickory_api() {
+        tokio::task::spawn_blocking(get_custom_resolver)
+            .await
+            .expect("resolver builder task should complete")
+            .expect("custom resolver should build");
+    }
 }
