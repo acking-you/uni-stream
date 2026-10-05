@@ -5,8 +5,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV
 use std::pin::Pin;
 use std::task::{ready, Context, Poll};
 
-use hickory_resolver::config::{NameServerConfigGroup, ResolverConfig, ResolverOpts};
-use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::TokioResolver;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
@@ -284,20 +284,19 @@ const DEFAULT_DNS_SERVER_GROUP: &[IpAddr] = &[
 static DNS_SERVER_GROUP: Lazy<RwLock<Vec<IpAddr>>> =
     Lazy::new(|| RwLock::new(DEFAULT_DNS_SERVER_GROUP.to_vec()));
 
-const DNS_QUERY_PORT: u16 = 53;
-
 #[inline]
 fn get_custom_resolver() -> Result<TokioResolver> {
     let dns_group = DNS_SERVER_GROUP.read();
-    let config = ResolverConfig::from_parts(
-        None,
-        vec![],
-        NameServerConfigGroup::from_ips_clear(&dns_group, DNS_QUERY_PORT, true),
+    let config = ResolverConfig::from_name_servers(
+        dns_group
+            .iter()
+            .copied()
+            .map(NameServerConfig::udp_and_tcp)
+            .collect(),
     );
-    let mut builder =
-        TokioResolver::builder_with_config(config, TokioConnectionProvider::default());
+    let mut builder = TokioResolver::builder_with_config(config, TokioRuntimeProvider::default());
     *builder.options_mut() = ResolverOpts::default();
-    Ok(builder.build())
+    builder.build().map_err(std::io::Error::other)
 }
 
 /// Set up DNS servers, use `DEFAULT_DNS_SERVER_GROUP` by default
@@ -311,18 +310,16 @@ pub fn set_custom_dns_server(dns_addrs: &[IpAddr]) -> Result<()> {
     Ok(())
 }
 
-/// Resolving domain to get `IpAddr`
-/// Note: must run as async runtime,such as [`tokio::task::spawn_blocking`]
+/// Resolve a domain asynchronously without occupying a blocking worker.
 pub async fn get_ip_addrs(s: &str) -> Result<Vec<IpAddr>> {
-    let s = s.to_owned();
-    tokio::task::spawn_blocking(move || get_ip_addrs_inner(&s))
+    let lookup = cached_resolver()?
+        .lookup_ip(s)
         .await
-        .map_err(|_| invalid_input!("get ip addrs"))?
+        .map_err(|e| invalid_input!(e))?;
+    Ok(lookup.into_iter().collect())
 }
 
-/// Resolving domain to get `IpAddr`
-/// Note: must run as async runtime,such as [`tokio::task::spawn_blocking`]
-fn get_ip_addrs_inner(s: &str) -> Result<Vec<IpAddr>> {
+fn cached_resolver() -> Result<TokioResolver> {
     thread_local! {
         static RESOLVER:Option<TokioResolver> = {
             match get_custom_resolver(){
@@ -334,14 +331,15 @@ fn get_ip_addrs_inner(s: &str) -> Result<Vec<IpAddr>> {
             }
         };
     }
-    let resolver = RESOLVER.with(|r| r.clone());
-    let resolver = try_opt!(resolver, "custom resolver not exist");
+    RESOLVER
+        .with(|resolver| resolver.clone())
+        .ok_or_else(|| invalid_input!("custom resolver not exist"))
+}
+
+fn get_ip_addrs_inner(s: &str) -> Result<Vec<IpAddr>> {
     let handle = tokio::runtime::Handle::try_current()
         .map_err(|_| invalid_input!("tokio runtime not found"))?;
-    let lookup = handle
-        .block_on(resolver.lookup_ip(s))
-        .map_err(|e| invalid_input!(e))?;
-    Ok(lookup.into_iter().collect())
+    handle.block_on(get_ip_addrs(s))
 }
 
 /// Resolving domain and port to get `SocketAddr`
@@ -405,4 +403,39 @@ where
             "could not resolve to any addresses",
         )
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn async_lookup_does_not_wait_for_the_blocking_pool() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let (release, wait) = std::sync::mpsc::channel();
+            let occupied = tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                let _ = wait.recv_timeout(Duration::from_secs(5));
+            });
+            ready.await.unwrap();
+            let result =
+                tokio::time::timeout(Duration::from_secs(1), get_ip_addrs("127.0.0.1")).await;
+            let _ = release.send(());
+            occupied.await.unwrap();
+            assert_eq!(
+                result
+                    .expect("async DNS must not queue a blocking job")
+                    .unwrap(),
+                vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]
+            );
+        });
+    }
 }

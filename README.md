@@ -25,7 +25,13 @@ To use `uni-stream` in your Rust project, simply add it as a dependency in your 
 [dependencies]
 uni-stream = "*"
 ``` 
-Minimum supported Rust version (MSRV): 1.75.
+Minimum supported Rust version (MSRV): 1.88, as required by the stable Hickory
+resolver with the DNS name-compression fix for
+[GHSA-q2qq-hmj6-3wpp](https://github.com/hickory-dns/hickory-dns/security/advisories/GHSA-q2qq-hmj6-3wpp).
+`addr::get_ip_addrs` awaits asynchronous DNS directly and does not consume a
+blocking-pool worker. The cached resolver and existing synchronous address
+adapters remain shared; cancelling an async lookup no longer leaves a blocking
+worker waiting for its result.
 
 Then, you can import and use the library in your Rust code.The following is a generic-based implementation of echo_server:
 
