@@ -314,18 +314,16 @@ pub fn set_custom_dns_server(dns_addrs: &[IpAddr]) -> Result<()> {
     Ok(())
 }
 
-/// Resolving domain to get `IpAddr`
-/// Note: must run as async runtime,such as [`tokio::task::spawn_blocking`]
+/// Resolve a domain asynchronously without occupying a blocking worker.
 pub async fn get_ip_addrs(s: &str) -> Result<Vec<IpAddr>> {
-    let s = s.to_owned();
-    tokio::task::spawn_blocking(move || get_ip_addrs_inner(&s))
+    let lookup = cached_resolver()?
+        .lookup_ip(s)
         .await
-        .map_err(|_| invalid_input!("get ip addrs"))?
+        .map_err(|e| invalid_input!(e))?;
+    Ok(lookup.iter().collect())
 }
 
-/// Resolving domain to get `IpAddr`
-/// Note: must run as async runtime,such as [`tokio::task::spawn_blocking`]
-fn get_ip_addrs_inner(s: &str) -> Result<Vec<IpAddr>> {
+fn cached_resolver() -> Result<TokioResolver> {
     thread_local! {
         static RESOLVER:Option<TokioResolver> = {
             match get_custom_resolver(){
@@ -337,14 +335,15 @@ fn get_ip_addrs_inner(s: &str) -> Result<Vec<IpAddr>> {
             }
         };
     }
-    let resolver = RESOLVER.with(|r| r.clone());
-    let resolver = try_opt!(resolver, "custom resolver not exist");
+    RESOLVER
+        .with(|resolver| resolver.clone())
+        .ok_or_else(|| invalid_input!("custom resolver not exist"))
+}
+
+fn get_ip_addrs_inner(s: &str) -> Result<Vec<IpAddr>> {
     let handle = tokio::runtime::Handle::try_current()
         .map_err(|_| invalid_input!("tokio runtime not found"))?;
-    let lookup = handle
-        .block_on(resolver.lookup_ip(s))
-        .map_err(|e| invalid_input!(e))?;
-    Ok(lookup.iter().collect())
+    handle.block_on(get_ip_addrs(s))
 }
 
 /// Resolving domain and port to get `SocketAddr`
@@ -412,7 +411,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::get_custom_resolver;
+    use std::time::Duration;
+
+    use super::*;
 
     #[tokio::test]
     async fn builds_custom_resolver_with_stable_hickory_api() {
@@ -420,5 +421,33 @@ mod tests {
             .await
             .expect("resolver builder task should complete")
             .expect("custom resolver should build");
+    }
+
+    #[test]
+    fn async_lookup_does_not_wait_for_the_blocking_pool() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let (release, wait) = std::sync::mpsc::channel();
+            let occupied = tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                let _ = wait.recv_timeout(Duration::from_secs(5));
+            });
+            ready.await.unwrap();
+            let result =
+                tokio::time::timeout(Duration::from_secs(1), get_ip_addrs("127.0.0.1")).await;
+            let _ = release.send(());
+            occupied.await.unwrap();
+            assert_eq!(
+                result
+                    .expect("async DNS must not queue a blocking job")
+                    .unwrap(),
+                vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]
+            );
+        });
     }
 }
