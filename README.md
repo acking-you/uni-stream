@@ -28,6 +28,9 @@ uni-stream = "*"
 Minimum supported Rust version (MSRV): 1.88, as required by the stable Hickory
 resolver with the DNS name-compression fix for
 [GHSA-q2qq-hmj6-3wpp](https://github.com/hickory-dns/hickory-dns/security/advisories/GHSA-q2qq-hmj6-3wpp).
+Standalone builds use Cargo resolver 3 to prefer dependencies compatible with
+this MSRV. When used as a dependency, the consuming workspace controls its
+resolver and lockfile.
 `addr::get_ip_addrs` awaits asynchronous DNS directly and does not consume a
 blocking-pool worker. The cached resolver and existing synchronous address
 adapters remain shared; cancelling an async lookup no longer leaves a blocking
