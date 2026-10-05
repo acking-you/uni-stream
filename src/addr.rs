@@ -287,7 +287,9 @@ static DNS_SERVER_GROUP: Lazy<RwLock<Vec<IpAddr>>> =
 #[inline]
 fn get_custom_resolver() -> Result<TokioResolver> {
     let dns_group = DNS_SERVER_GROUP.read();
-    let config = ResolverConfig::from_name_servers(
+    let config = ResolverConfig::from_parts(
+        None,
+        vec![],
         dns_group
             .iter()
             .copied()
@@ -296,7 +298,9 @@ fn get_custom_resolver() -> Result<TokioResolver> {
     );
     let mut builder = TokioResolver::builder_with_config(config, TokioRuntimeProvider::default());
     *builder.options_mut() = ResolverOpts::default();
-    builder.build().map_err(std::io::Error::other)
+    builder
+        .build()
+        .map_err(|error| invalid_input!(format!("create custom resolver error:{error}")))
 }
 
 /// Set up DNS servers, use `DEFAULT_DNS_SERVER_GROUP` by default
@@ -316,7 +320,7 @@ pub async fn get_ip_addrs(s: &str) -> Result<Vec<IpAddr>> {
         .lookup_ip(s)
         .await
         .map_err(|e| invalid_input!(e))?;
-    Ok(lookup.into_iter().collect())
+    Ok(lookup.iter().collect())
 }
 
 fn cached_resolver() -> Result<TokioResolver> {
@@ -410,6 +414,14 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[tokio::test]
+    async fn builds_custom_resolver_with_stable_hickory_api() {
+        tokio::task::spawn_blocking(get_custom_resolver)
+            .await
+            .expect("resolver builder task should complete")
+            .expect("custom resolver should build");
+    }
 
     #[test]
     fn async_lookup_does_not_wait_for_the_blocking_pool() {
