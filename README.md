@@ -25,8 +25,9 @@ To use `uni-stream` in your Rust project, simply add it as a dependency in your 
 [dependencies]
 uni-stream = "*"
 ``` 
-Minimum supported Rust version (MSRV): 1.88, as required by the stable Hickory
-resolver with the DNS name-compression fix for
+Minimum supported Rust version (MSRV): 1.95, as required by `parking_lot` 0.13
+and `kanal-plus` 0.2.1 (`lock_api` 0.5). The Hickory resolver is kept at a
+release with the DNS name-compression fix for
 [GHSA-q2qq-hmj6-3wpp](https://github.com/hickory-dns/hickory-dns/security/advisories/GHSA-q2qq-hmj6-3wpp).
 Standalone builds use Cargo resolver 3 to prefer dependencies compatible with
 this MSRV. When used as a dependency, the consuming workspace controls its

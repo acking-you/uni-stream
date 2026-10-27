@@ -1,6 +1,7 @@
 //! Provides a `tokio::TcpStream`-like UDP stream implementation based on `tokio::UdpSocket`.
 
 use std::fmt::Debug;
+#[cfg(feature = "udp-timeout")]
 use std::future::Future;
 use std::io::{self};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -76,12 +77,12 @@ macro_rules! error_get_or_continue {
 
 mod impl_inner {
     #[cfg(feature = "udp-timeout")]
+    use std::sync::LazyLock;
+    #[cfg(feature = "udp-timeout")]
     use std::time::Duration;
 
     #[cfg(feature = "udp-timeout")]
     use futures::FutureExt;
-    #[cfg(feature = "udp-timeout")]
-    use once_cell::sync::Lazy;
     #[cfg(feature = "udp-timeout")]
     use tokio::time::{sleep, Instant};
 
@@ -196,7 +197,7 @@ mod impl_inner {
     }
 
     #[cfg(feature = "udp-timeout")]
-    static TIMEOUT: Lazy<Duration> = Lazy::new(|| match unsafe { CUSTOM_TIMEOUT } {
+    static TIMEOUT: LazyLock<Duration> = LazyLock::new(|| match unsafe { CUSTOM_TIMEOUT } {
         Some(dur) => dur,
         None => DEFAULT_TIMEOUT,
     });

@@ -3,12 +3,12 @@
 use std::future::{self, Future};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::pin::Pin;
+use std::sync::LazyLock;
 use std::task::{ready, Context, Poll};
 
 use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::TokioResolver;
-use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use tokio::task::JoinHandle;
 
@@ -281,8 +281,8 @@ const DEFAULT_DNS_SERVER_GROUP: &[IpAddr] = &[
 ];
 
 /// Customized dns resolution server
-static DNS_SERVER_GROUP: Lazy<RwLock<Vec<IpAddr>>> =
-    Lazy::new(|| RwLock::new(DEFAULT_DNS_SERVER_GROUP.to_vec()));
+static DNS_SERVER_GROUP: LazyLock<RwLock<Vec<IpAddr>>> =
+    LazyLock::new(|| RwLock::new(DEFAULT_DNS_SERVER_GROUP.to_vec()));
 
 #[inline]
 fn get_custom_resolver() -> Result<TokioResolver> {
