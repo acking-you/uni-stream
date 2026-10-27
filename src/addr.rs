@@ -3,13 +3,12 @@
 use std::future::{self, Future};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::pin::Pin;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, PoisonError, RwLock};
 use std::task::{ready, Context, Poll};
 
 use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::TokioResolver;
-use parking_lot::RwLock;
 use tokio::task::JoinHandle;
 
 type Result<T, E = std::io::Error> = std::result::Result<T, E>;
@@ -286,7 +285,9 @@ static DNS_SERVER_GROUP: LazyLock<RwLock<Vec<IpAddr>>> =
 
 #[inline]
 fn get_custom_resolver() -> Result<TokioResolver> {
-    let dns_group = DNS_SERVER_GROUP.read();
+    let dns_group = DNS_SERVER_GROUP
+        .read()
+        .unwrap_or_else(PoisonError::into_inner);
     let config = ResolverConfig::from_parts(
         None,
         vec![],
@@ -307,10 +308,11 @@ fn get_custom_resolver() -> Result<TokioResolver> {
 /// Note: must be called before the first network connection to be effective
 #[inline]
 pub fn set_custom_dns_server(dns_addrs: &[IpAddr]) -> Result<()> {
-    let mut writer = DNS_SERVER_GROUP.write();
-    let servers: &mut Vec<IpAddr> = writer.as_mut();
+    let mut servers = DNS_SERVER_GROUP
+        .write()
+        .unwrap_or_else(PoisonError::into_inner);
     servers.clear();
-    dns_addrs.iter().for_each(|&a| servers.push(a));
+    servers.extend_from_slice(dns_addrs);
     Ok(())
 }
 

@@ -29,7 +29,6 @@ tokio = { version = "1", features = [
 futures = "0.3.34"
 hickory-resolver = "0.26.3"
 kanal-plus = "0.2.1"
-parking_lot = "0.13"
 
 [features]
 default = ["udp-timeout"]
